@@ -1,0 +1,60 @@
+name: Daily Node Update
+
+on:
+  schedule:
+    # 北京时间每天 08:00 (UTC时间 00:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 允许手动运行
+
+jobs:
+  update-nodes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须有写入权限才能推送代码
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+
+      - name: Create Template File
+        run: |
+          # 确保目录存在
+          sudo mkdir -p /etc/sing-box
+          
+          # 将 Secrets 里的节点写入文件
+          # 注意：这里使用引号包裹以防止变量中有特殊字符导致错误
+          echo "${{ secrets.VMESS_TEMPLATE }}" | sudo tee /etc/sing-box/url.txt > /dev/null
+          
+          echo "模板文件已创建，路径: /etc/sing-box/url.txt"
+
+      - name: Run Script and Save to File
+        run: |
+          # 赋予仓库内的脚本执行权限（如果你已经推送到仓库）
+          # 建议直接运行当前仓库检出的脚本，而不是去 curl 远程的（这样测试更方便）
+          chmod +x cfyx.sh
+          
+          # 运行脚本，提取 vmess 链接覆盖写入 deip.txt
+          # 使用 ./cfyx.sh 运行当前目录下的脚本
+          ./cfyx.sh | grep "^vmess://" > deip.txt
+          
+          echo "生成节点数量预览:"
+          wc -l deip.txt
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 检查是否有文件变动
+          if [[ -n $(git status -s) ]]; then
+            git add deip.txt
+            git commit -m "Auto update nodes: $(date +'%Y-%m-%d')"
+            git push
+          else
+            echo "No changes to commit."
+          fi
