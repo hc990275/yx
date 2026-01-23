@@ -48,8 +48,7 @@ check_deps() {
 }
 
 get_github_ips() {
-    # 这里定义 3.txt 的下载地址
-    # 如果地址有变，请修改这里
+    # 优选 IP 源地址 (3.txt)
     local url="https://raw.githubusercontent.com/hc990275/yx/main/3.txt"
     
     echo -e "${YELLOW}正在从 GitHub 获取优选 IP 列表...${NC}"
@@ -73,7 +72,7 @@ get_github_ips() {
         return 1
     fi
 
-    # 随机打乱数组，保证每次生成的节点不一样
+    # 随机打乱数组，保证每次生成的节点顺序不一样
     local temp_file=$(mktemp)
     for ip in "${ip_list[@]}"; do echo "$ip" >> "$temp_file"; done
     mapfile -t ip_list < <(shuf "$temp_file")
@@ -89,11 +88,11 @@ main() {
     
     echo -e "${GREEN}=================================================="
     echo -e " 节点优选生成器 (Custom For You)"
-    echo -e " 数据源: GitHub (hc990275/yx)"
+    echo -e " 模式: 自动全量 (GitHub 源)"
     echo -e "==================================================${NC}"
     echo ""
 
-    # 1. 获取种子节点 (原逻辑保持不变)
+    # 1. 获取种子节点
     if [ -f "$url_file" ]; then
         mapfile -t urls < "$url_file"
         for url in "${urls[@]}"; do
@@ -134,67 +133,23 @@ main() {
     local base64_part=${selected_url#"vmess://"}
     local original_json=$(echo "$base64_part" | base64 -d)
     local original_ps=$(echo "$original_json" | jq -r .ps)
-    echo -e "${GREEN}已选择模板: $original_ps${NC}"
-    
-    # 2. 选择模式
-    echo -e "${YELLOW}请选择操作模式:${NC}"
-    echo "  1) GitHub 优选库 (hc990275/yx/3.txt)"
-    echo "  2) Cloudflare 官方 IP (随机段)"
-    
-    local ip_source_choice; local use_optimized_ips=false
-    while true; do
-        read -p "请输入选项 (1-2): " ip_source_choice
-        if [[ "$ip_source_choice" == "1" ]]; then use_optimized_ips=true; break;
-        elif [[ "$ip_source_choice" == "2" ]]; then break;
-        else echo -e "${RED}无效输入.${NC}"; fi
-    done
-    
-    # 3. 准备 IP 列表
-    declare -a ip_list
-    local num_to_generate=0
+    # echo -e "${GREEN}已选择模板: $original_ps${NC}" # 既然自动了，这句也可以省略，或者保留作为提示
 
-    if $use_optimized_ips; then
-        # 获取 GitHub IP
-        get_github_ips || exit 1
-        
-        # 询问数量
-        local max_available=${#ip_list[@]}
-        while true; do
-            read -p "检测到 $max_available 个优选IP，请输入想生成的数量 (默认全部，直接回车): " input_num
-            if [ -z "$input_num" ]; then num_to_generate=$max_available; break; fi
-            if [[ "$input_num" =~ ^[0-9]+$ ]] && [ "$input_num" -gt 0 ] && [ "$input_num" -le "$max_available" ]; then
-                num_to_generate=$input_num; break;
-            else echo -e "${RED}请输入 1-$max_available 之间的数字.${NC}"; fi
-        done
-    else
-        # Cloudflare 官方逻辑 (未变动)
-        echo -e "${YELLOW}正在获取 Cloudflare 官方 IP 段...${NC}"
-        cloudflare_ips=$(curl -s https://www.cloudflare.com/ips-v4)
-        mapfile -t ip_list <<< "$cloudflare_ips"
-        while true; do
-            read -p "请输入生成数量: " num_to_generate
-            if [[ "$num_to_generate" =~ ^[0-9]+$ ]]; then break; fi
-        done
-    fi
+    # 2. 获取 IP 列表 (强制使用 GitHub 模式)
+    get_github_ips || exit 1
+
+    # 3. 确定生成数量 (强制全部)
+    local num_to_generate=${#ip_list[@]}
+    echo -e "${YELLOW}正在自动生成全部 $num_to_generate 个节点...${NC}"
 
     # 4. 生成新链接
     echo "---"
     echo -e "${YELLOW}=== 生成结果 ===${NC}"
     
     for ((i=0; i<$num_to_generate; i++)); do
-        local current_ip=""
-        
-        if $use_optimized_ips; then
-            # 模式1: 直接从列表中取
-            current_ip=${ip_list[$i]}
-        else
-            # 模式2: 随机生成
-            local random_range=${ip_list[$((RANDOM % ${#ip_list[@]}))]}
-            current_ip=${random_range%/*} # 简单取网段头，或者你可以自己写随机生成IP逻辑
-        fi
+        local current_ip=${ip_list[$i]}
         
         # 构造新名字: 原名-IP
-        # 注意: 因为是纯IP文本，没有ISP名字了，直接把IP附在后面方便区分
         local new_ps="${original_ps}-${current_ip}"
         
         # 修改 JSON (替换 add 和 ps)
@@ -206,7 +161,7 @@ main() {
     done
     
     echo "---"
-    echo -e "${GREEN}生成完毕! 已生成 $num_to_generate 个链接.${NC}"
+    echo -e "${GREEN}生成完毕! 已自动生成 $num_to_generate 个链接.${NC}"
 }
 
 check_deps
