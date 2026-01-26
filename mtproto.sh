@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: MTProto Proxy (无 Systemd / Nohup版)
-# 适用环境: 所有 Linux 发行版 (包括严重受限的 LXC/Docker 容器)
-# 核心原理: 使用 Python + Nohup 后台运行，绕过系统服务限制
+# 脚本名称: MTProto Proxy (配置文件版 - 修复启动报错)
+# 核心原理: 生成 config.py 配置文件，避免命令行参数解析错误
 # =========================================================
 
 RED='\033[0;31m'
@@ -22,13 +21,12 @@ fi
 # 1. 环境安装
 # =========================================================
 install_env() {
-    echo -e "${YELLOW}>>> 正在安装 Python 环境...${PLAIN}"
+    echo -e "${YELLOW}>>> [1/4] 检查 Python 环境...${PLAIN}"
     
     if [ -f /etc/debian_version ]; then
         apt-get update -y
         # 强制安装，忽略错误
         apt-get install -y git python3 python3-pip curl grep || true
-        # 尝试安装依赖库 (如果 apt 失败则忽略，Python 自带库通常够用)
         apt-get install -y python3-cryptography python3-uvloop || true
     elif [ -f /etc/redhat-release ]; then
         yum update -y
@@ -39,7 +37,6 @@ install_env() {
         echo -e "${RED}Python3 安装失败，请尝试手动安装。${PLAIN}"
         exit 1
     fi
-    echo -e "${GREEN}环境准备完毕。${PLAIN}"
 }
 
 # =========================================================
@@ -48,66 +45,80 @@ install_env() {
 install_and_run() {
     install_env
 
-    # 1. 清理旧进程
+    # 1. 停止旧进程
     pkill -f "mtprotoproxy.py"
-    rm -rf "$WORKDIR"
-
-    # 2. 下载源码
-    echo -e "${YELLOW}>>> 正在拉取源码...${PLAIN}"
-    git clone https://github.com/alexbers/mtprotoproxy.git "$WORKDIR"
     
+    # 2. 准备目录
     if [ ! -d "$WORKDIR" ]; then
-        echo -e "${RED}源码下载失败，请检查网络。${PLAIN}"
+        echo -e "${YELLOW}>>> [2/4] 拉取源码...${PLAIN}"
+        git clone https://github.com/alexbers/mtprotoproxy.git "$WORKDIR"
+    else
+        echo -e "${YELLOW}>>> 源码目录已存在，跳过下载。${PLAIN}"
+    fi
+    
+    if [ ! -f "$WORKDIR/mtprotoproxy.py" ]; then
+        echo -e "${RED}源码文件缺失，请删除 $WORKDIR 目录后重试。${PLAIN}"
         return
     fi
+
+    cd "$WORKDIR"
 
     # 3. 设置端口和密钥
     DEFAULT_PORT=$((RANDOM % 10000 + 20000))
     read -p "请输入端口 (默认 $DEFAULT_PORT): " INPUT_PORT
     PROXY_PORT=${INPUT_PORT:-$DEFAULT_PORT}
     
+    # 生成 32 字符 Hex 密钥
     PROXY_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
 
-    # 4. 使用 nohup 启动 (关键修改)
-    echo -e "${YELLOW}>>> 正在启动服务...${PLAIN}"
-    cd "$WORKDIR"
+    # 4. 生成 config.py (关键修复步骤)
+    echo -e "${YELLOW}>>> [3/4] 生成配置文件 (config.py)...${PLAIN}"
     
-    # nohup 也就是 "No Hang Up"，让程序在后台不挂断运行
-    # 日志会输出到 log.txt
-    nohup python3 mtprotoproxy.py -p $PROXY_PORT -s $PROXY_SECRET > log.txt 2>&1 &
+    cat <<EOF > config.py
+PORT = ${PROXY_PORT}
+
+# 用户列表: { "密钥": "用户名" }
+USERS = {
+    "${PROXY_SECRET}": "default_user"
+}
+
+# 开启多线程模式 (根据 CPU 核心数)
+import multiprocessing
+ADVERTISED_TAG = "00000000000000000000000000000000"
+EOF
+
+    # 5. 启动服务 (不带参数启动，让它读取 config.py)
+    echo -e "${YELLOW}>>> [4/4] 正在启动服务...${PLAIN}"
     
-    sleep 2
+    # 清理旧日志
+    rm -f log.txt
     
-    # 5. 检查是否存活
+    # nohup 后台启动，不传任何参数！
+    nohup python3 mtprotoproxy.py > log.txt 2>&1 &
+    
+    sleep 3
+    
+    # 6. 检查状态
     if pgrep -f "mtprotoproxy.py" > /dev/null; then
-        # 保存配置信息到文件，方便下次读取
-        echo "PORT=$PROXY_PORT" > "$WORKDIR/config.env"
-        echo "SECRET=$PROXY_SECRET" >> "$WORKDIR/config.env"
-        
-        show_info $PROXY_PORT $PROXY_SECRET
+        show_info_direct $PROXY_PORT $PROXY_SECRET
     else
-        echo -e "${RED}启动失败！请查看日志:${PLAIN}"
-        cat "$WORKDIR/log.txt"
+        echo -e "${RED}启动失败！这是最新的报错日志:${PLAIN}"
+        echo "----------------------------------------"
+        cat log.txt
+        echo "----------------------------------------"
     fi
 }
 
 # =========================================================
 # 3. 显示信息
 # =========================================================
-show_info() {
+show_info_direct() {
     local port=$1
     local secret=$2
     local ip=$(curl -s 4.ipw.cn || curl -s ifconfig.me)
 
-    # 如果参数为空，尝试从文件读取
-    if [[ -z "$port" ]] && [[ -f "$WORKDIR/config.env" ]]; then
-        source "$WORKDIR/config.env"
-        port=$PORT
-        secret=$SECRET
-    fi
-
     echo "========================================================"
-    echo -e "   ${GREEN}MTProto 代理 (Nohup版) 运行中${PLAIN}"
+    echo -e "   ${GREEN}MTProto 代理 (Config模式) 运行中${PLAIN}"
     echo "========================================================"
     echo -e "IP 地址: ${YELLOW}$ip${PLAIN}"
     echo -e "端口   : ${YELLOW}$port${PLAIN}"
@@ -115,20 +126,36 @@ show_info() {
     echo "--------------------------------------------------------"
     echo -e "TG 链接: ${GREEN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${PLAIN}"
     echo "========================================================"
-    echo -e "${YELLOW}注意: 重启 VPS 后需要重新运行脚本启动 (因为没有 Systemd)${PLAIN}"
+    echo -e "${YELLOW}提示: 如果需要修改端口/密钥，直接编辑 $WORKDIR/config.py 然后重启脚本即可。${PLAIN}"
+}
+
+# 读取 config.py 显示信息
+read_config_info() {
+    if [ ! -f "$WORKDIR/config.py" ]; then
+        echo "未找到配置文件。"
+        return
+    fi
+    
+    cd "$WORKDIR"
+    # 简单的 grep 提取，并不完美但够用
+    local port=$(grep "^PORT =" config.py | awk -F'= ' '{print $2}')
+    local secret=$(grep -oP '"[0-9a-f]{32}"' config.py | head -1 | tr -d '"')
+    local ip=$(curl -s 4.ipw.cn)
+    
+    echo "当前配置 (从文件读取):"
+    echo "端口: $port"
+    echo "密钥: $secret"
+    echo -e "链接: ${GREEN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${PLAIN}"
 }
 
 # =========================================================
-# 4. 停止服务
+# 4. 辅助功能
 # =========================================================
 stop_proxy() {
     pkill -f "mtprotoproxy.py"
     echo -e "${GREEN}服务已停止。${PLAIN}"
 }
 
-# =========================================================
-# 5. 查看日志
-# =========================================================
 view_log() {
     if [ -f "$WORKDIR/log.txt" ]; then
         tail -n 20 "$WORKDIR/log.txt"
@@ -143,10 +170,10 @@ view_log() {
 show_menu() {
     clear
     echo "========================================================"
-    echo -e "${GREEN}MTProto 终极兼容版 (No-Systemd)${PLAIN}"
+    echo -e "${GREEN}MTProto 修复版 (Config Mode)${PLAIN}"
     echo "========================================================"
     echo "1. 安装并启动 (Install & Start)"
-    echo "2. 查看连接信息 (Show Link)"
+    echo "2. 查看连接信息 (Read Config)"
     echo "3. 停止服务 (Stop)"
     echo "4. 查看运行日志 (View Log)"
     echo "0. 退出"
@@ -155,7 +182,7 @@ show_menu() {
 
     case "$num" in
         1) install_and_run ;;
-        2) show_info ;;
+        2) read_config_info ;;
         3) stop_proxy ;;
         4) view_log ;;
         0) exit 0 ;;
