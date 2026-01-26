@@ -2,7 +2,7 @@
 
 # =========================================================
 # 脚本名称: MTProto Proxy (最终完美版 V4)
-# 修正内容: 修复 config.py 格式错误，彻底消除 Bad Secret 报错
+# 修正内容: 修复 config.py 格式颠倒问题，彻底消除 Bad Secret 报错
 # =========================================================
 
 RED='\033[0;31m'
@@ -57,13 +57,13 @@ install_and_run() {
     # 生成 32 字符 Hex 密钥
     PROXY_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
 
-    # 4. 生成 config.py (已修正格式)
+    # 4. 生成 config.py (关键修正：USERS 格式修正为 "用户名": "密钥")
     echo -e "${YELLOW}>>> [3/4] 生成配置文件...${PLAIN}"
     
-    # 修正点：USERS 字典格式应该是 "用户名": "密钥"
     cat <<EOF > config.py
 PORT = ${PROXY_PORT}
 
+# 格式必须是: "用户名": "32位Hex密钥"
 USERS = {
     "my_user": "${PROXY_SECRET}"
 }
@@ -76,6 +76,7 @@ EOF
     echo -e "${YELLOW}>>> [4/4] 正在启动服务...${PLAIN}"
     
     rm -f log.txt
+    # 后台静默启动
     nohup python3 mtprotoproxy.py > log.txt 2>&1 &
     
     sleep 3
@@ -84,7 +85,7 @@ EOF
     if pgrep -f "mtprotoproxy.py" > /dev/null; then
         show_info_direct $PROXY_PORT $PROXY_SECRET
     else
-        echo -e "${RED}启动失败！日志如下:${PLAIN}"
+        echo -e "${RED}启动失败！请查看日志:${PLAIN}"
         cat log.txt
     fi
 }
@@ -108,14 +109,14 @@ show_info_direct() {
     echo "========================================================"
 }
 
-# 读取 config.py 显示信息
+# 从 config.py 读取信息
 read_config_info() {
     if [ ! -f "$WORKDIR/config.py" ]; then
         echo "未找到配置文件。"
         return
     fi
     local port=$(grep "^PORT =" "$WORKDIR/config.py" | awk -F'= ' '{print $2}')
-    # 修正读取逻辑
+    # 修正读取正则
     local secret=$(grep -oP '"[0-9a-f]{32}"' "$WORKDIR/config.py" | head -1 | tr -d '"')
     local ip=$(curl -s 4.ipw.cn)
     
