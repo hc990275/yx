@@ -1,123 +1,79 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: MTProto Proxy 管理脚本 (菜单版)
-# 版本: 2.0 (Go Version)
-# 功能: 一键安装、查看连接、日志排查、卸载管理
+# 脚本名称: MTProto Proxy (Python版) 一键安装脚本
+# 适用系统: Ubuntu 20.04+, Debian 10+ (推荐 Ubuntu 24.04)
+# 特点: 兼容性最好，解决 Go 版本无法运行的问题
 # =========================================================
 
-# 定义颜色配置
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 PLAIN='\033[0m'
 
-# 检查是否为 Root 用户
+# 检查 Root
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 请使用 root 用户运行此脚本！${PLAIN}"
+    echo -e "${RED}错误: 请使用 root 用户运行此脚本。${PLAIN}"
     exit 1
 fi
 
 # =========================================================
-# 核心功能函数
+# 1. 安装环境与依赖
 # =========================================================
+echo -e "${GREEN}>>> [1/5] 正在更新系统并安装 Python 环境...${PLAIN}"
+# 为了兼容 Ubuntu 24.04 的 PEP 668 限制，我们优先使用 apt 安装 python 库
+apt-get update -y
+apt-get install -y git python3 python3-pip python3-cryptography python3-uvloop curl
 
-# 1. 安装基础依赖
-check_dependencies() {
-    echo -e "${YELLOW}正在检查系统依赖...${PLAIN}"
-    if [ -f /etc/debian_version ]; then
-        apt-get update -y
-        apt-get install -y curl wget tar openssl grep
-    elif [ -f /etc/redhat-release ]; then
-        yum update -y
-        yum install -y curl wget tar openssl grep
-    fi
-}
+# =========================================================
+# 2. 配置参数
+# =========================================================
+echo -e "${GREEN}>>> [2/5] 配置代理参数...${PLAIN}"
 
-# 2. 获取公网 IP
-get_public_ip() {
-    local ip=$(curl -s 4.ipw.cn)
-    if [[ -z "$ip" ]]; then
-        ip=$(curl -s ifconfig.me)
-    fi
-    echo $ip
-}
+# 设置端口
+DEFAULT_PORT=$((RANDOM % 10000 + 20000))
+read -p "请输入端口 (默认 $DEFAULT_PORT): " INPUT_PORT
+PROXY_PORT=${INPUT_PORT:-$DEFAULT_PORT}
 
-# 3. 安装主逻辑
-install_mtproto() {
-    check_dependencies
-    
-    echo -e "${GREEN}>>> 开始安装流程${PLAIN}"
+# 生成密钥 (Secret)
+# Python 版通常生成 32 字符的 hex 密钥
+PROXY_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
 
-    # --- 设置端口 ---
-    read -p "请输入代理端口 (默认随机 20000-60000): " input_port
-    if [[ -z "$input_port" ]]; then
-        PROXY_PORT=$((RANDOM % 40000 + 20000))
-    else
-        PROXY_PORT=$input_port
-    fi
-    
-    # 检查端口占用
-    if netstat -tlunp | grep -q ":$PROXY_PORT "; then
-        echo -e "${RED}错误: 端口 $PROXY_PORT 已被占用，请更换其他端口。${PLAIN}"
-        return
-    fi
+echo -e "端口: $PROXY_PORT"
+echo -e "密钥: $PROXY_SECRET"
 
-    # --- 生成密钥 ---
-    # 使用 openssl 生成 16字节(32字符) 的 Hex 密钥
-    PROXY_SECRET=$(openssl rand -hex 16)
+# =========================================================
+# 3. 下载源码 (使用 alexbers/mtprotoproxy 高性能异步版)
+# =========================================================
+echo -e "${GREEN}>>> [3/5] 拉取项目源码...${PLAIN}"
 
-    # --- 下载程序 ---
-    echo -e "${YELLOW}正在检测系统架构...${PLAIN}"
-    ARCH=$(uname -m)
-    MTG_VERSION="2.1.7"
-    DOWNLOAD_URL=""
+# 清理旧目录
+rm -rf /opt/mtprotoproxy
 
-    if [[ "$ARCH" == "x86_64" ]]; then
-        DOWNLOAD_URL="https://github.com/9seconds/mtg/releases/download/v${MTG_VERSION}/mtg-${MTG_VERSION}-linux-amd64.tar.gz"
-    elif [[ "$ARCH" == "aarch64" ]]; then
-        DOWNLOAD_URL="https://github.com/9seconds/mtg/releases/download/v${MTG_VERSION}/mtg-${MTG_VERSION}-linux-arm64.tar.gz"
-    else
-        echo -e "${RED}不支持的架构: $ARCH${PLAIN}"
-        return
-    fi
+# 克隆仓库
+git clone https://github.com/alexbers/mtprotoproxy.git /opt/mtprotoproxy
 
-    echo -e "${YELLOW}正在下载主程序...${PLAIN}"
-    rm -f mtg.tar.gz
-    wget -O mtg.tar.gz "$DOWNLOAD_URL"
+if [ ! -d "/opt/mtprotoproxy" ]; then
+    echo -e "${RED}错误: 源码下载失败，请检查 GitHub 连接。${PLAIN}"
+    exit 1
+fi
 
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}下载失败，请检查网络。${PLAIN}"
-        return
-    fi
+# =========================================================
+# 4. 配置 Systemd 服务
+# =========================================================
+echo -e "${GREEN}>>> [4/5] 配置后台服务...${PLAIN}"
 
-    # --- 解压与安装 ---
-    tar -xzf mtg.tar.gz
-    # 停止旧服务（如果存在）
-    systemctl stop mtg 2>/dev/null
-    
-    # 移动文件
-    mv mtg-${MTG_VERSION}-linux-*/mtg /usr/local/bin/mtg
-    chmod +x /usr/local/bin/mtg
-    rm -rf mtg.tar.gz mtg-${MTG_VERSION}-linux-*
-
-    # --- 关键：兼容性测试 ---
-    echo -e "${YELLOW}正在进行运行测试...${PLAIN}"
-    /usr/local/bin/mtg version > /dev/null 2>&1
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}严重错误: 下载的程序无法在此 VPS 上运行！安装终止。${PLAIN}"
-        return
-    fi
-
-    # --- 配置 Systemd 服务 ---
-    cat <<EOF > /etc/systemd/system/mtg.service
+cat <<EOF > /etc/systemd/system/mtproto-py.service
 [Unit]
-Description=MTProto Proxy Service
+Description=MTProto Proxy (Python Async)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mtg simple-run -n 0.0.0.0:${PROXY_PORT} ${PROXY_SECRET}
+User=root
+WorkingDirectory=/opt/mtprotoproxy
+# 启动命令: 指定端口和密钥
+ExecStart=/usr/bin/python3 /opt/mtprotoproxy/mtprotoproxy.py -p ${PROXY_PORT} -s ${PROXY_SECRET}
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -126,119 +82,43 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-    # --- 启动服务 ---
-    systemctl daemon-reload
-    systemctl enable mtg
-    systemctl start mtg
+# 重载并启动
+systemctl daemon-reload
+systemctl enable mtproto-py
+systemctl restart mtproto-py
 
-    # --- 配置防火墙 ---
-    if command -v ufw > /dev/null; then
-        ufw allow $PROXY_PORT/tcp
-        ufw allow $PROXY_PORT/udp
-    fi
-    if command -v iptables > /dev/null; then
-        iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
-        iptables -I INPUT -p udp --dport $PROXY_PORT -j ACCEPT
-    fi
+# =========================================================
+# 5. 防火墙与状态检查
+# =========================================================
+echo -e "${GREEN}>>> [5/5] 检查运行状态...${PLAIN}"
 
-    echo -e "${GREEN}安装完成！${PLAIN}"
-    show_connection_info
-}
+# 简单放行端口
+if command -v ufw > /dev/null; then
+    ufw allow $PROXY_PORT/tcp
+fi
+if command -v iptables > /dev/null; then
+    iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
+fi
 
-# 4. 查看连接信息
-show_connection_info() {
-    # 从服务文件中读取配置，避免变量丢失
-    if [ ! -f /etc/systemd/system/mtg.service ]; then
-        echo -e "${RED}未检测到安装信息。${PLAIN}"
-        return
-    fi
+sleep 2
 
-    # 提取端口和密钥
-    local cmd=$(grep "ExecStart" /etc/systemd/system/mtg.service)
-    local port=$(echo $cmd | grep -oP '0.0.0.0:\K\d+')
-    local secret=$(echo $cmd | awk '{print $NF}')
-    local ip=$(get_public_ip)
+# 检查服务是否存活
+if systemctl is-active --quiet mtproto-py; then
+    PUBLIC_IP=$(curl -s 4.ipw.cn)
+    [ -z "$PUBLIC_IP" ] && PUBLIC_IP="你的VPS_IP"
 
     echo "========================================================"
-    echo -e "   ${GREEN}MTProto 代理连接信息${PLAIN}"
+    echo -e "   ${GREEN}MTProto (Python版) 安装成功！${PLAIN}"
     echo "========================================================"
-    echo -e "IP 地址: ${YELLOW}$ip${PLAIN}"
-    echo -e "端口   : ${YELLOW}$port${PLAIN}"
-    echo -e "密钥   : ${YELLOW}$secret${PLAIN}"
+    echo -e "IP 地址: ${YELLOW}${PUBLIC_IP}${PLAIN}"
+    echo -e "端口   : ${YELLOW}${PROXY_PORT}${PLAIN}"
+    echo -e "密钥   : ${YELLOW}${PROXY_SECRET}${PLAIN}"
     echo "--------------------------------------------------------"
-    echo -e "TG 一键链接: "
-    echo -e "${GREEN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${PLAIN}"
+    echo -e "TG 一键链接:"
+    echo -e "${GREEN}tg://proxy?server=${PUBLIC_IP}&port=${PROXY_PORT}&secret=${PROXY_SECRET}${PLAIN}"
     echo "========================================================"
-}
-
-# 5. 查看运行状态
-check_status() {
-    echo -e "${YELLOW}>>> 系统服务状态:${PLAIN}"
-    systemctl status mtg --no-pager
-}
-
-# 6. 查看错误日志
-view_log() {
-    echo -e "${YELLOW}>>> 最近 20 行日志:${PLAIN}"
-    journalctl -u mtg -n 20 --no-pager
-}
-
-# 7. 卸载代理
-uninstall_mtproto() {
-    echo -e "${YELLOW}正在停止服务...${PLAIN}"
-    systemctl stop mtg
-    systemctl disable mtg
-    
-    echo -e "${YELLOW}正在删除文件...${PLAIN}"
-    rm -f /etc/systemd/system/mtg.service
-    rm -f /usr/local/bin/mtg
-    systemctl daemon-reload
-    
-    echo -e "${GREEN}卸载完成。${PLAIN}"
-}
-
-# =========================================================
-# 菜单主界面
-# =========================================================
-
-show_menu() {
-    clear
-    echo "========================================================"
-    echo -e "${GREEN}MTProto Proxy 一键管理脚本 ${PLAIN}"
-    echo -e "${YELLOW}注意: 如果连接失败，请检查云服务商网页防火墙是否放行端口${PLAIN}"
-    echo "========================================================"
-    echo "1. 安装 / 重装代理 (Install/Reinstall)"
-    echo "2. 查看连接链接 (Show Link)"
-    echo "3. 查看运行状态 (Check Status)"
-    echo "4. 查看错误日志 (View Logs)"
-    echo "5. 卸载代理 (Uninstall)"
-    echo "0. 退出脚本 (Exit)"
-    echo "========================================================"
-    read -p "请输入数字 [0-5]: " num
-    case "$num" in
-        1)
-            install_mtproto
-            ;;
-        2)
-            show_connection_info
-            ;;
-        3)
-            check_status
-            ;;
-        4)
-            view_log
-            ;;
-        5)
-            uninstall_mtproto
-            ;;
-        0)
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}请输入正确的数字 [0-5]${PLAIN}"
-            ;;
-    esac
-}
-
-# 启动菜单
-show_menu
+    echo -e "${YELLOW}注意: 如果连不上，请务必去阿里云/腾讯云网页后台放行 ${PROXY_PORT} 端口！${PLAIN}"
+else
+    echo -e "${RED}服务启动失败。${PLAIN}"
+    echo "请运行 journalctl -u mtproto-py -n 20 查看报错。"
+fi
