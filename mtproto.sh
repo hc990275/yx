@@ -1,144 +1,158 @@
-cat > mtproto.sh << 'EOF'
 #!/bin/bash
 
-# =========================================================
-# 脚本名称: MTProto Proxy (最终完美版 V4 - 强制修复)
-# =========================================================
+# ==================================================
+# 脚本修改自: eooce (适配 Linux VPS 通用版)
+# 功能: 自动获取IP、自定义端口、后台运行、生成链接
+# ==================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-PLAIN='\033[0m'
-WORKDIR="/opt/mtproto_proxy"
+# 1. 定义颜色函数 (保留原风格)
+red() { echo -e "\e[1;91m$1\033[0m"; }
+green() { echo -e "\e[1;32m$1\033[0m"; }
+yellow() { echo -e "\e[1;33m$1\033[0m"; }
+purple() { echo -e "\e[1;35m$1\033[0m"; }
 
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 请使用 root 用户运行此脚本。${PLAIN}"
-    exit 1
-fi
+# 2. 初始化变量
+WORKDIR="$HOME/mtp"
+mkdir -p "$WORKDIR"
 
-install_env() {
-    if [ -f /etc/debian_version ]; then
-        apt-get update -y
-        apt-get install -y git python3 python3-pip curl grep || true
-        apt-get install -y python3-cryptography python3-uvloop || true
-    elif [ -f /etc/redhat-release ]; then
-        yum update -y
-        yum install -y git python3 python3-pip curl grep || true
+# 3. 检查并清理旧进程
+check_and_kill() {
+    if pgrep -x "mtg" > /dev/null; then
+        yellow "检测到旧的 mtg 进程，正在停止..."
+        pkill -x mtg
     fi
 }
 
-install_and_run() {
-    install_env
-
-    # 1. 强制杀掉所有旧进程
-    pkill -f "mtprotoproxy.py"
-    
-    # 2. 准备目录
-    if [ ! -d "$WORKDIR" ]; then
-        git clone https://github.com/alexbers/mtprotoproxy.git "$WORKDIR"
+# 4. 获取本机公网 IP (修改为通用方式)
+get_ip() {
+    # 尝试多个源获取 IP
+    IP=$(curl -s 4.ipw.cn)
+    if [[ -z "$IP" ]]; then
+        IP=$(curl -s ifconfig.me)
     fi
+    
+    if [[ -z "$IP" ]]; then
+        red "无法获取公网 IP，请检查网络！"
+        exit 1
+    fi
+    green "获取到本机 IP: $IP"
+}
+
+# 5. 设置端口 (去除 devil 命令，改为手动输入或随机)
+check_port() {
+    read -p "请输入 MTProto 端口 (回车随机 20000-60000): " input_port
+    if [[ -z "$input_port" ]]; then
+        MTP_PORT=$((RANDOM % 40000 + 20000))
+    else
+        MTP_PORT=$input_port
+    fi
+    
+    # 简单检查端口占用
+    if netstat -tlunp 2>/dev/null | grep -q ":$MTP_PORT "; then
+        red "端口 $MTP_PORT 已被占用，请重新运行脚本更换端口！"
+        exit 1
+    fi
+    
+    green "使用端口: $MTP_PORT"
+}
+
+# 6. 生成密钥
+get_secret() {
+    # 使用 openssl 生成标准的 hex 密钥
+    if command -v openssl >/dev/null; then
+        SECRET=$(openssl rand -hex 16)
+    else
+        # 如果没有 openssl，用备用方法
+        SECRET=$(head -c 16 /dev/urandom | xxd -ps)
+    fi
+    # echo "密钥: $SECRET"
+}
+
+# 7. 下载并运行 (核心修改：改为下载 Linux 版本)
+download_run() {
     cd "$WORKDIR"
     
-    # 清理旧的缓存和配置，防止干扰
-    rm -rf __pycache__
-    rm -f config.py
-
-    # 3. 设置端口
-    DEFAULT_PORT=$((RANDOM % 10000 + 20000))
-    read -p "请输入端口 (默认 $DEFAULT_PORT): " INPUT_PORT
-    PROXY_PORT=${INPUT_PORT:-$DEFAULT_PORT}
+    yellow "正在下载主程序..."
     
-    # 生成 32 字符 Hex 密钥
-    PROXY_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
-
-    # 4. 生成正确的配置文件 (修复了键值对顺序)
-    echo -e "${YELLOW}>>> 正在生成 V4 配置文件...${PLAIN}"
-    cat <<CONFIG > config.py
-PORT = ${PROXY_PORT}
-
-# 格式: "用户名": "密钥"
-USERS = {
-    "my_user": "${PROXY_SECRET}"
-}
-
-import multiprocessing
-ADVERTISED_TAG = "00000000000000000000000000000000"
-CONFIG
-
-    # 5. 启动服务
-    echo -e "${YELLOW}>>> 正在启动服务...${PLAIN}"
-    rm -f log.txt
-    nohup python3 mtprotoproxy.py > log.txt 2>&1 &
-    
-    sleep 3
-    
-    if pgrep -f "mtprotoproxy.py" > /dev/null; then
-        show_info_direct $PROXY_PORT $PROXY_SECRET
+    # 判断架构
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        # 下载 Linux amd64 版本 (使用官方稳定源)
+        wget -q -O mtg "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-amd64"
+    elif [[ "$ARCH" == "aarch64" ]]; then
+        # 下载 Linux arm64 版本
+        wget -q -O mtg "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-arm64"
     else
-        echo -e "${RED}启动失败！日志如下:${PLAIN}"
-        cat log.txt
+        red "不支持的架构: $ARCH"
+        exit 1
+    fi
+
+    if [ ! -f "mtg" ]; then
+        # 如果上面下载失败，尝试下载 tar 包解压 (备用方案)
+        wget -q -O mtg.tar.gz "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-amd64.tar.gz"
+        tar -xzf mtg.tar.gz
+        mv mtg-*-linux-*/mtg .
+        rm -rf mtg-*-linux-* mtg.tar.gz
+    fi
+
+    if [ ! -f "mtg" ]; then
+        red "下载失败，请检查网络。"
+        exit 1
+    fi
+
+    chmod +x mtg
+    
+    yellow "正在启动..."
+    # 使用 nohup 后台运行 (原作者的逻辑，不依赖 systemd)
+    nohup ./mtg simple-run -n 0.0.0.0:$MTP_PORT $SECRET > mtg.log 2>&1 &
+    
+    sleep 2
+    
+    if pgrep -x "mtg" > /dev/null; then
+        green "启动成功！"
+    else
+        red "启动失败！可能是二进制文件不兼容。"
+        red "查看日志: cat $WORKDIR/mtg.log"
+        exit 1
     fi
 }
 
-show_info_direct() {
-    local port=$1
-    local secret=$2
-    local ip=$(curl -s 4.ipw.cn || curl -s ifconfig.me)
-
-    echo "========================================================"
-    echo -e "   ${GREEN}MTProto 代理 (V4 修复完成)${PLAIN}"
-    echo "========================================================"
-    echo -e "IP 地址: ${YELLOW}$ip${PLAIN}"
-    echo -e "端口   : ${YELLOW}$port${PLAIN}"
-    echo -e "密钥   : ${YELLOW}$secret${PLAIN}"
-    echo "--------------------------------------------------------"
-    echo -e "TG 链接: ${GREEN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${PLAIN}"
-    echo "========================================================"
+# 8. 显示连接信息
+show_info() {
+    purple "\n========================================"
+    purple "       MTProto 代理连接信息"
+    purple "========================================"
+    echo -e "IP: \t\e[1;33m$IP\033[0m"
+    echo -e "端口: \t\e[1;33m$MTP_PORT\033[0m"
+    echo -e "密钥: \t\e[1;33m$SECRET\033[0m"
+    purple "----------------------------------------"
+    
+    LINK="tg://proxy?server=$IP&port=$MTP_PORT&secret=$SECRET"
+    green "TG 一键链接:"
+    echo -e "\e[4;34m$LINK\033[0m"
+    
+    # 保存链接到文件
+    echo "$LINK" > "$WORKDIR/link.txt"
+    purple "========================================"
+    yellow "提示: 进程已在后台运行。如需停止，请运行: pkill -x mtg"
 }
 
-read_config_info() {
-    if [ ! -f "$WORKDIR/config.py" ]; then
-        echo "未找到配置文件，请先安装。"
-        return
+# === 主逻辑 ===
+main() {
+    # 检查基础依赖
+    if [ -f /etc/debian_version ]; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y wget curl net-tools openssl >/dev/null 2>&1
+    elif [ -f /etc/redhat-release ]; then
+        yum install -y wget curl net-tools openssl >/dev/null 2>&1
     fi
-    local port=$(grep "^PORT =" "$WORKDIR/config.py" | awk -F'= ' '{print $2}')
-    local secret=$(grep -oP '"[0-9a-f]{32}"' "$WORKDIR/config.py" | head -1 | tr -d '"')
-    local ip=$(curl -s 4.ipw.cn)
-    echo -e "端口: $port"
-    echo -e "密钥: $secret"
-    echo -e "链接: ${GREEN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${PLAIN}"
+
+    check_and_kill
+    get_ip
+    check_port
+    get_secret
+    download_run
+    show_info
 }
 
-stop_proxy() {
-    pkill -f "mtprotoproxy.py"
-    echo "服务已停止"
-}
-
-view_log() {
-    [ -f "$WORKDIR/log.txt" ] && tail -n 20 "$WORKDIR/log.txt"
-}
-
-show_menu() {
-    clear
-    echo "========================================================"
-    echo -e "${GREEN}MTProto 最终完美版 V4${PLAIN}"
-    echo "========================================================"
-    echo "1. 安装并启动 (Install & Start)"
-    echo "2. 查看连接信息 (Show Info)"
-    echo "3. 停止服务 (Stop)"
-    echo "4. 查看日志 (Log)"
-    echo "0. 退出"
-    echo "========================================================"
-    read -p "选项: " num
-    case "$num" in
-        1) install_and_run ;;
-        2) read_config_info ;;
-        3) stop_proxy ;;
-        4) view_log ;;
-        0) exit 0 ;;
-        *) echo "无效输入" ;;
-    esac
-}
-
-show_menu
-EOF
+main
