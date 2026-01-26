@@ -1,158 +1,152 @@
 #!/bin/bash
 
 # ==================================================
-# 脚本修改自: eooce (适配 Linux VPS 通用版)
-# 功能: 自动获取IP、自定义端口、后台运行、生成链接
+# 脚本修改自: eooce (Linux 移植修复版)
+# 核心修改: 
+# 1. 移除 devil (Serv00专用) 命令，改为 Linux 通用命令
+# 2. 替换 FreeBSD 二进制文件为 Linux 版
+# 3. 修复原代码中的语法错误
 # ==================================================
 
-# 1. 定义颜色函数 (保留原风格)
+# 颜色函数 (保留原版)
 red() { echo -e "\e[1;91m$1\033[0m"; }
 green() { echo -e "\e[1;32m$1\033[0m"; }
 yellow() { echo -e "\e[1;33m$1\033[0m"; }
 purple() { echo -e "\e[1;35m$1\033[0m"; }
 
-# 2. 初始化变量
+# 基础变量
+HOSTNAME=$(hostname)
+USERNAME=$(whoami)
+# 生成密钥: 如果没设置就根据用户名生成，或者随机生成
+export SECRET=${SECRET:-$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | xxd -ps)}
 WORKDIR="$HOME/mtp"
 mkdir -p "$WORKDIR"
 
-# 3. 检查并清理旧进程
-check_and_kill() {
-    if pgrep -x "mtg" > /dev/null; then
-        yellow "检测到旧的 mtg 进程，正在停止..."
-        pkill -x mtg
-    fi
-}
+# 清理旧进程
+pgrep -x mtg > /dev/null && pkill -9 mtg >/dev/null 2>&1
 
-# 4. 获取本机公网 IP (修改为通用方式)
-get_ip() {
-    # 尝试多个源获取 IP
-    IP=$(curl -s 4.ipw.cn)
-    if [[ -z "$IP" ]]; then
-        IP=$(curl -s ifconfig.me)
-    fi
-    
-    if [[ -z "$IP" ]]; then
-        red "无法获取公网 IP，请检查网络！"
-        exit 1
-    fi
-    green "获取到本机 IP: $IP"
-}
-
-# 5. 设置端口 (去除 devil 命令，改为手动输入或随机)
+# 1. 端口检查函数 (修改为 Linux 版)
 check_port() {
-    read -p "请输入 MTProto 端口 (回车随机 20000-60000): " input_port
-    if [[ -z "$input_port" ]]; then
-        MTP_PORT=$((RANDOM % 40000 + 20000))
-    else
-        MTP_PORT=$input_port
+    # 安装必要工具
+    if ! command -v netstat >/dev/null; then
+        if [ -f /etc/debian_version ]; then
+            apt-get update -y && apt-get install -y net-tools
+        elif [ -f /etc/redhat-release ]; then
+            yum install -y net-tools
+        fi
+    fi
+
+    echo -e "\033[1;35m请输入MTProto代理端口(直接回车则使用随机端口): \033[0m"
+    read -p "" port
+    
+    while true; do
+        if [[ -z $port ]]; then
+            port=$(shuf -i 20000-60000 -n 1)
+            yellow "使用随机端口: $port"
+        fi
+        
+        # 检查端口占用 (使用 netstat 替代 devil)
+        if netstat -tlunp | grep -q ":$port "; then
+            red "端口 ${port} 已经被占用，正在重新生成..."
+            port=""
+            continue
+        else
+            green "端口 $port 可用"
+            MTP_PORT=$port
+            break
+        fi
+    done
+}
+
+# 2. 获取 IP 函数 (修改为 Linux 版)
+get_ip() {
+    # 移除 devil vhost 逻辑，改为 curl 获取
+    IP1=$(curl -s 4.ipw.cn)
+    if [[ -z "$IP1" ]]; then
+        IP1=$(curl -s ifconfig.me)
     fi
     
-    # 简单检查端口占用
-    if netstat -tlunp 2>/dev/null | grep -q ":$MTP_PORT "; then
-        red "端口 $MTP_PORT 已被占用，请重新运行脚本更换端口！"
+    if [[ -z "$IP1" ]]; then
+        red "无法获取公网 IP，请检查网络"
         exit 1
     fi
-    
-    green "使用端口: $MTP_PORT"
+    green "获取到公网 IP: $IP1"
 }
 
-# 6. 生成密钥
-get_secret() {
-    # 使用 openssl 生成标准的 hex 密钥
-    if command -v openssl >/dev/null; then
-        SECRET=$(openssl rand -hex 16)
-    else
-        # 如果没有 openssl，用备用方法
-        SECRET=$(head -c 16 /dev/urandom | xxd -ps)
-    fi
-    # echo "密钥: $SECRET"
-}
-
-# 7. 下载并运行 (核心修改：改为下载 Linux 版本)
-download_run() {
-    cd "$WORKDIR"
+# 3. 下载并运行函数 (修改为 Linux 版下载源)
+download_run(){
+    cd ${WORKDIR}
     
-    yellow "正在下载主程序..."
-    
-    # 判断架构
+    # 检测架构
     ARCH=$(uname -m)
     if [[ "$ARCH" == "x86_64" ]]; then
-        # 下载 Linux amd64 版本 (使用官方稳定源)
-        wget -q -O mtg "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-amd64"
+        # 9seconds/mtg 官方 Linux amd64
+        DL_URL="https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-amd64.tar.gz"
     elif [[ "$ARCH" == "aarch64" ]]; then
-        # 下载 Linux arm64 版本
-        wget -q -O mtg "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-arm64"
+        # 9seconds/mtg 官方 Linux arm64
+        DL_URL="https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-arm64.tar.gz"
     else
         red "不支持的架构: $ARCH"
         exit 1
     fi
 
+    # 下载或检查是否存在
     if [ ! -f "mtg" ]; then
-        # 如果上面下载失败，尝试下载 tar 包解压 (备用方案)
-        wget -q -O mtg.tar.gz "https://github.com/9seconds/mtg/releases/download/v2.1.7/mtg-2.1.7-linux-amd64.tar.gz"
+        yellow "正在下载主程序..."
+        wget -q -O mtg.tar.gz "$DL_URL"
+        if [ $? -ne 0 ]; then
+            red "下载失败！"
+            exit 1
+        fi
         tar -xzf mtg.tar.gz
         mv mtg-*-linux-*/mtg .
         rm -rf mtg-*-linux-* mtg.tar.gz
+        chmod +x mtg
     fi
 
-    if [ ! -f "mtg" ]; then
-        red "下载失败，请检查网络。"
-        exit 1
-    fi
-
-    chmod +x mtg
-    
-    yellow "正在启动..."
-    # 使用 nohup 后台运行 (原作者的逻辑，不依赖 systemd)
+    # 运行 (使用 nohup 后台运行)
+    # 注意: 新版 mtg 使用 simple-run 命令
     nohup ./mtg simple-run -n 0.0.0.0:$MTP_PORT $SECRET > mtg.log 2>&1 &
     
     sleep 2
-    
     if pgrep -x "mtg" > /dev/null; then
-        green "启动成功！"
+        green "MTProto 代理启动成功！"
     else
-        red "启动失败！可能是二进制文件不兼容。"
-        red "查看日志: cat $WORKDIR/mtg.log"
+        red "启动失败，请查看目录下的 mtg.log"
+        cat mtg.log
         exit 1
     fi
 }
 
-# 8. 显示连接信息
-show_info() {
-    purple "\n========================================"
-    purple "       MTProto 代理连接信息"
-    purple "========================================"
-    echo -e "IP: \t\e[1;33m$IP\033[0m"
-    echo -e "端口: \t\e[1;33m$MTP_PORT\033[0m"
-    echo -e "密钥: \t\e[1;33m$SECRET\033[0m"
-    purple "----------------------------------------"
+# 4. 生成信息和重启脚本 (保留原版逻辑)
+generate_info() {
+    purple "\n====================================="
+    purple "          分享链接 (已保存到 link.txt)"
+    purple "====================================="
     
-    LINK="tg://proxy?server=$IP&port=$MTP_PORT&secret=$SECRET"
-    green "TG 一键链接:"
-    echo -e "\e[4;34m$LINK\033[0m"
+    LINK="tg://proxy?server=$IP1&port=$MTP_PORT&secret=$SECRET"
+    echo -e "$LINK"
+    echo -e "$LINK" > link.txt
+
+    # 生成重启脚本 restart.sh
+    cat > restart.sh <<EOF
+#!/bin/bash
+pkill -x mtg
+cd $WORKDIR
+nohup ./mtg simple-run -n 0.0.0.0:$MTP_PORT $SECRET > mtg.log 2>&1 &
+echo "已重启 mtg"
+EOF
+    chmod +x restart.sh
     
-    # 保存链接到文件
-    echo "$LINK" > "$WORKDIR/link.txt"
-    purple "========================================"
-    yellow "提示: 进程已在后台运行。如需停止，请运行: pkill -x mtg"
+    purple "\n提示: 目录下已生成 restart.sh，进程挂掉可直接运行 ./restart.sh 重启"
 }
 
-# === 主逻辑 ===
+# === 主流程 ===
 main() {
-    # 检查基础依赖
-    if [ -f /etc/debian_version ]; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y wget curl net-tools openssl >/dev/null 2>&1
-    elif [ -f /etc/redhat-release ]; then
-        yum install -y wget curl net-tools openssl >/dev/null 2>&1
-    fi
-
-    check_and_kill
-    get_ip
     check_port
-    get_secret
+    get_ip
     download_run
-    show_info
+    generate_info
 }
 
 main
