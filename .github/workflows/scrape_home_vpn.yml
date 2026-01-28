@@ -1,4 +1,4 @@
-name: 抓取家宽 VPN (保留地区+过滤219)
+name: 抓取家宽 VPN (持久化+倒序+严选)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: '*/5 * * * *'
 
 jobs:
-  scrape-filter-keep-info:
+  scrape-persist-reverse:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -17,55 +17,77 @@ jobs:
 
       - name: 安装工具
         run: |
-          # 安装 lynx，它可以把 HTML 网页变成整齐的文本，保留 IP 和地区的对应关系
           sudo apt-get update
           sudo apt-get install -y lynx
 
-      - name: 抓取并处理
+      - name: 抓取、过滤并合并数据
         env:
           VPN_SOURCE_URL: ${{ secrets.VPN_SOURCE_URL }}
         run: |
           mkdir -p 家宽
           cd 家宽
           
-          echo "1. 正在获取数据并转换为文本格式..."
-          # -dump: 转换为文本
-          # -width=300: 防止行被截断，确保 IP 和国家在同一行
-          lynx -dump -width=300 "$VPN_SOURCE_URL" > raw_text.txt
+          # =======================================================
+          # 第一步：获取最新数据 (New Data)
+          # =======================================================
+          echo "1. 正在抓取新数据..."
+          # 使用 lynx 转换为文本，保留整行信息
+          lynx -dump -width=300 "$VPN_SOURCE_URL" > raw_latest.txt
 
-          echo "2. 提取包含 IP 的有效行..."
-          # 筛选包含类似 x.x.x.x 格式的行
-          grep -E "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" raw_text.txt > valid_lines.txt
-
-          # ----------------------------------------------------
-          # 核心逻辑：使用 awk 进行智能过滤和格式化
-          # ----------------------------------------------------
+          # 提取包含有效 IP 的行，并进行严格过滤
+          # 1. grep: 提取包含数字开头的行 (假设IP在行首)
+          # 2. awk: 严格排除 $1 (第一列IP) 以 "219." 开头的行
+          #    同时给每一行加上表格竖线 "| ... |"
+          grep -E "^[0-9]{1,3}\.[0-9]{1,3}\." raw_latest.txt | \
+          awk '$1 !~ /^219\./ {print "| " $0 " |"}' > new_entries.txt
           
-          # 定义一个函数来生成 Markdown 头部
-          write_header() {
-            echo "# $1" > "$2"
-            echo "" >> "$2"
-            echo "> 更新时间: $(date '+%Y-%m-%d %H:%M:%S')" >> "$2"
-            echo "" >> "$2"
-            # 假设网页转换后的前三列通常是 IP 端口 地区，这里做一个通用表头
-            echo "| 原始信息行 (IP/端口/地区) |" >> "$2"
-            echo "| :--- |" >> "$2"
-          }
+          echo "本次抓取到的非219数据量: $(wc -l < new_entries.txt)"
 
-          # --- 任务 1: 生成 非 219 的列表 (重点) ---
-          write_header "非 219 开头 IP 列表" "非219IP.md"
+          # =======================================================
+          # 第二步：读取旧数据 (Old Data)
+          # =======================================================
+          echo "2. 读取历史数据..."
+          touch 非219IP.md # 确保文件存在
           
-          # 逻辑解释：
-          # !/\b219\./ : 不匹配单词边界为 219. 的内容 (防止误杀 1.2.219.5)
-          # {print "| " $0 " |"} : 把整行内容放入表格列中
-          awk '!/\b219\./ {print "| " $0 " |"}' valid_lines.txt >> 非219IP.md
+          # 从现有的 md 文件中提取数据行 (排除表头和空行)
+          # grep "^| [0-9]" 表示只取以 "| 数字" 开头的表格行
+          grep "^| [0-9]" 非219IP.md > history_entries.txt || true
 
-          # --- 任务 2: 生成 完整列表 (可选，如果你还需要的话) ---
-          write_header "完整家宽 VPN 列表" "README.md"
-          awk '{print "| " $0 " |"}' valid_lines.txt >> README.md
+          # =======================================================
+          # 第三步：合并、去重、倒序 (Merge & Sort)
+          # =======================================================
+          echo "3. 合并新旧数据并倒序排列..."
+          
+          # 逻辑：将【新数据】放在【旧数据】前面，然后去重
+          # 这样最新抓到的会排在最上面 (时间倒序效果)
+          cat new_entries.txt history_entries.txt > combined.txt
+          
+          # awk 去重：!seen[$0]++ 确保完全相同的行只保留第一次出现的
+          # 因为新数据在上面，所以重复时保留的是新数据的位置（还是在上面）
+          awk '!seen[$0]++' combined.txt > final_list.txt
 
+          # 如果你指的是 "IP数值倒序" (9.x.x.x 排在 1.x.x.x 前面)，
+          # 请取消下面这行注释 (目前默认是按"发现时间"倒序，新的在最前)
+          # sort -r -V final_list.txt -o final_list.txt
+
+          # =======================================================
+          # 第四步：写入文件
+          # =======================================================
+          echo "4. 生成最终文件..."
+          
+          # 写入表头
+          echo "# 非 219 IP 永久记录库" > 非219IP.md
+          echo "" >> 非219IP.md
+          echo "> 最后更新: $(date '+%Y-%m-%d %H:%M:%S') | 累计数量: $(wc -l < final_list.txt)" >> 非219IP.md
+          echo "" >> 非219IP.md
+          echo "| IP / 端口 / 地区信息 |" >> 非219IP.md
+          echo "| :--- |" >> 非219IP.md
+          
+          # 写入处理好的数据列表
+          cat final_list.txt >> 非219IP.md
+          
           # 清理临时文件
-          rm raw_text.txt valid_lines.txt
+          rm raw_latest.txt new_entries.txt history_entries.txt combined.txt final_list.txt
 
       - name: 提交并推送
         run: |
@@ -74,8 +96,8 @@ jobs:
           
           if [[ -n $(git status -s) ]]; then
             git add .
-            git commit -m "更新: VPN列表 (保留地区信息) [$(date '+%H:%M')]"
+            git commit -m "更新: 非219 IP库 (持久化累加) [$(date '+%H:%M')]"
             git push
           else
-            echo "无变化。"
+            echo "没有新数据加入，跳过提交。"
           fi
