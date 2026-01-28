@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # =========================================================
-#  VPS 多协议代理一键管理脚本 (GOST v2) - x86_64 专用版
-#  功能：HTTP/SOCKS5 代理搭建、连接监控、服务管理
+#   VPS SOCKS5 代理一键管理脚本 (GOST v2) - 纯净版
+#   架构: 全架构自适应 (x86_64 / ARM64)
+#   功能: 仅 SOCKS5 协议 | 自动安装依赖 | 系统服务管理
 # =========================================================
 
 # --- 基础配置 ---
@@ -18,8 +19,6 @@ GOST_PATH="/usr/bin/gost"
 SERVICE_NAME="gost"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 GOST_VERSION="2.11.5"
-# 锁定 x86_64 下载链接，修复之前的版本错误问题
-DOWNLOAD_URL="https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION}.gz"
 
 # --- 辅助函数 ---
 
@@ -40,16 +39,65 @@ wait_and_return() {
 
 # --- 核心功能函数 ---
 
-# 1. 安装代理 (包含修复功能)
-install_proxy() {
-    echo -e "${SKYBLUE}>>> 开始安装/重装 GOST 代理服务 (x86_64)${PLAIN}"
+# 新增：依赖检查与更新函数
+install_dependencies() {
+    echo -e "${YELLOW}>>> 正在更新系统源并安装必要依赖...${PLAIN}"
+    
+    # 检测包管理器
+    if command -v apt-get >/dev/null 2>&1; then
+        PM="apt-get"
+        $PM update -y
+        $PM install -y wget gzip curl net-tools
+    elif command -v yum >/dev/null 2>&1; then
+        PM="yum"
+        $PM makecache
+        $PM install -y wget gzip curl net-tools
+    elif command -v dnf >/dev/null 2>&1; then
+        PM="dnf"
+        $PM makecache
+        $PM install -y wget gzip curl net-tools
+    else
+        echo -e "${RED}未检测到支持的包管理器 (apt/yum/dnf)，请手动安装 wget 和 gzip。${PLAIN}"
+        return 1
+    fi
+    echo -e "${GREEN}依赖安装/更新完成。${PLAIN}"
+}
 
-    # 1.1 停止旧服务
+# 1. 安装代理
+install_proxy() {
+    echo -e "${SKYBLUE}>>> 开始安装/重装 GOST SOCKS5 代理${PLAIN}"
+
+    # 1.0 先安装依赖
+    install_dependencies
+
+    # 1.1 架构检测
+    echo -e "${YELLOW}正在检测系统架构...${PLAIN}"
+    ARCH=$(uname -m)
+    GOST_ARCH=""
+
+    case $ARCH in
+        x86_64|amd64)
+            GOST_ARCH="amd64"
+            echo -e "检测结果: ${GREEN}x86_64 (AMD64)${PLAIN}"
+            ;;
+        aarch64|arm64)
+            GOST_ARCH="armv8"
+            echo -e "检测结果: ${GREEN}ARM64 (aarch64)${PLAIN}"
+            ;;
+        *)
+            echo -e "${RED}错误: 不支持的系统架构 ($ARCH)${PLAIN}"
+            return 1
+            ;;
+    esac
+
+    # 动态构建下载链接
+    DOWNLOAD_URL="https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-linux-${GOST_ARCH}-${GOST_VERSION}.gz"
+
+    # 1.2 停止旧服务
     systemctl stop $SERVICE_NAME >/dev/null 2>&1
 
-    # 1.2 下载并安装二进制文件
+    # 1.3 下载并安装二进制文件
     echo -e "${GREEN}正在下载 GOST 程序文件...${PLAIN}"
-    # 强制删除旧文件，防止残留
     rm -f "$GOST_PATH" 
     
     wget --no-check-certificate -O gost.gz "$DOWNLOAD_URL"
@@ -64,37 +112,39 @@ install_proxy() {
     mv gost "$GOST_PATH"
     chmod +x "$GOST_PATH"
 
-    # 验证安装是否成功
+    # 验证安装
     if "$GOST_PATH" -V >/dev/null 2>&1; then
-        echo -e "${GREEN}程序安装成功！${PLAIN}"
+        echo -e "${GREEN}程序安装成功！版本: $("$GOST_PATH" -V 2>&1)${PLAIN}"
     else
-        echo -e "${RED}程序安装失败 (无法执行)，请联系开发者。${PLAIN}"
+        echo -e "${RED}程序安装失败 (无法执行)。请联系开发者。${PLAIN}"
         rm -f "$GOST_PATH"
         return 1
     fi
 
-    # 1.3 配置参数
+    # 1.4 配置参数 (强制 SOCKS5)
     echo -e ""
-    echo -e "${YELLOW}请配置代理参数：${PLAIN}"
+    echo -e "${YELLOW}请配置 SOCKS5 代理参数：${PLAIN}"
     read -p "请输入端口 (默认 1080): " PORT
     [[ -z "$PORT" ]] && PORT="1080"
 
     read -p "请输入用户名 (直接回车表示无密码): " USER
     read -p "请输入密码 (直接回车表示无密码): " PASS
 
-    # 构建启动命令
+    # 构建启动命令 (关键修改：增加 socks5:// 前缀)
     if [[ -z "$USER" || -z "$PASS" ]]; then
-        EXEC_CMD="$GOST_PATH -L :$PORT"
+        # 无密码模式
+        EXEC_CMD="$GOST_PATH -L socks5://:$PORT"
         AUTH_INFO="无认证"
     else
-        EXEC_CMD="$GOST_PATH -L ${USER}:${PASS}@:$PORT"
+        # 有密码模式
+        EXEC_CMD="$GOST_PATH -L socks5://${USER}:${PASS}@:$PORT"
         AUTH_INFO="${USER}:${PASS}"
     fi
 
-    # 1.4 创建 Systemd 服务文件
+    # 1.5 创建 Systemd 服务文件
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=GOST Proxy Service
+Description=GOST SOCKS5 Proxy Service
 After=network.target
 
 [Service]
@@ -102,19 +152,18 @@ Type=simple
 ExecStart=$EXEC_CMD
 Restart=always
 User=root
-# 增加文件描述符限制，防止高并发断连
 LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # 1.5 启动服务
+    # 1.6 启动服务
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl restart "$SERVICE_NAME"
 
-    # 1.6 开放防火墙
+    # 1.7 开放防火墙
     echo -e "${GREEN}正在配置防火墙...${PLAIN}"
     if command -v ufw >/dev/null 2>&1; then
         ufw allow "$PORT"/tcp
@@ -128,17 +177,17 @@ EOF
         iptables -I INPUT -p udp --dport "$PORT" -j ACCEPT
     fi
 
-    # 1.7 显示结果
+    # 1.8 显示结果
     echo -e ""
     echo -e "${GREEN}====================================${PLAIN}"
-    echo -e "${GREEN}  代理安装完成并已启动！${PLAIN}"
+    echo -e "${GREEN}  SOCKS5 代理安装完成并已启动！${PLAIN}"
     echo -e "${GREEN}====================================${PLAIN}"
-    echo -e " 协议类型 : ${SKYBLUE}HTTP + SOCKS5 (共用端口)${PLAIN}"
+    echo -e " 架构检测 : ${SKYBLUE}${ARCH} -> ${GOST_ARCH}${PLAIN}"
+    echo -e " 协议类型 : ${SKYBLUE}SOCKS5 纯净模式${PLAIN}"
     echo -e " 端口     : ${SKYBLUE}${PORT}${PLAIN}"
     echo -e " 认证信息 : ${SKYBLUE}${AUTH_INFO}${PLAIN}"
     echo -e "${GREEN}====================================${PLAIN}"
     
-    # 自动检查一次状态
     sleep 1
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo -e " 服务状态 : ${GREEN}运行中 (Active)${PLAIN}"
@@ -204,13 +253,12 @@ view_connections() {
         echo -e "当前监听端口: ${GREEN}${CURRENT_PORT}${PLAIN}"
         echo -e "---------------------------------"
         
-        # 统计连接数 (优先使用 ss，如果没有则使用 netstat)
         if command -v ss >/dev/null 2>&1; then
             CONN_COUNT=$(ss -anp | grep ":${CURRENT_PORT} " | grep ESTAB | wc -l)
         elif command -v netstat >/dev/null 2>&1; then
             CONN_COUNT=$(netstat -anp | grep ":${CURRENT_PORT} " | grep ESTABLISHED | wc -l)
         else
-            echo -e "${RED}未找到 ss 或 netstat 命令，无法统计。${PLAIN}"
+            echo -e "${RED}未找到 ss 或 netstat 命令，请先安装 net-tools。${PLAIN}"
             wait_and_return
             return
         fi
@@ -234,10 +282,10 @@ show_menu() {
     check_root
     clear
     echo -e "${SKYBLUE}====================================${PLAIN}"
-    echo -e "${SKYBLUE}    VPS 代理一键管理脚本 (GOST)     ${PLAIN}"
-    echo -e "${SKYBLUE}    架构: x86_64 专用版             ${PLAIN}"
+    echo -e "${SKYBLUE}   VPS SOCKS5 代理管理脚本 (GOST)   ${PLAIN}"
+    echo -e "${SKYBLUE}   架构: 自适应 (含依赖自动更新)    ${PLAIN}"
     echo -e "${SKYBLUE}====================================${PLAIN}"
-    echo -e "${GREEN}1.${PLAIN} 安装/重装代理 (修复 203 错误)"
+    echo -e "${GREEN}1.${PLAIN} 安装/重装代理 (SOCKS5 专用)"
     echo -e "${GREEN}2.${PLAIN} 卸载代理"
     echo -e "------------------------------------"
     echo -e "${GREEN}3.${PLAIN} 启动服务"
