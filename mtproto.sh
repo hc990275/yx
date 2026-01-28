@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =========================================================
-#   VPS SOCKS5 代理一键管理脚本 (GOST v2) - TG 链接增强版
+#   VPS SOCKS5 代理一键管理脚本 (GOST v2) - 终极管理版
 #   架构: 全架构自适应 (x86_64 / ARM64)
-#   功能: SOCKS5 协议 | 自动安装依赖 | 生成 Telegram 链接
+#   功能: 端口修改 | 监控与链接合一 | 自动依赖管理
 # =========================================================
 
 # --- 基础配置 ---
@@ -32,10 +32,9 @@ check_root() {
 
 # 获取公网 IP
 get_public_ip() {
-    # 尝试多个接口以确保获取成功
     PUBLIC_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || curl -s https://icanhazip.com)
     if [[ -z "$PUBLIC_IP" ]]; then
-        PUBLIC_IP="127.0.0.1" # 获取失败时的兜底
+        PUBLIC_IP="127.0.0.1"
     fi
 }
 
@@ -46,41 +45,35 @@ wait_and_return() {
     show_menu
 }
 
-# --- 核心功能函数 ---
-
-# 新增：依赖检查与更新函数
+# 检查依赖
 install_dependencies() {
-    echo -e "${YELLOW}>>> 正在更新系统源并安装必要依赖...${PLAIN}"
-    
-    # 检测包管理器
-    if command -v apt-get >/dev/null 2>&1; then
-        PM="apt-get"
-        $PM update -y
-        $PM install -y wget gzip curl net-tools
-    elif command -v yum >/dev/null 2>&1; then
-        PM="yum"
-        $PM makecache
-        $PM install -y wget gzip curl net-tools
-    elif command -v dnf >/dev/null 2>&1; then
-        PM="dnf"
-        $PM makecache
-        $PM install -y wget gzip curl net-tools
-    else
-        echo -e "${RED}未检测到支持的包管理器 (apt/yum/dnf)，请手动安装 wget 和 gzip。${PLAIN}"
-        return 1
+    # 仅在安装时检查，加快其他操作速度
+    if [[ "$1" == "check" ]]; then
+        echo -e "${YELLOW}>>> 正在检查并更新必要依赖...${PLAIN}"
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y >/dev/null 2>&1
+            apt-get install -y wget gzip curl net-tools >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then
+            yum makecache >/dev/null 2>&1
+            yum install -y wget gzip curl net-tools >/dev/null 2>&1
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf makecache >/dev/null 2>&1
+            dnf install -y wget gzip curl net-tools >/dev/null 2>&1
+        fi
+        echo -e "${GREEN}依赖检查完成。${PLAIN}"
     fi
-    echo -e "${GREEN}依赖安装/更新完成。${PLAIN}"
 }
+
+# --- 核心功能函数 ---
 
 # 1. 安装代理
 install_proxy() {
     echo -e "${SKYBLUE}>>> 开始安装/重装 GOST SOCKS5 代理${PLAIN}"
 
-    # 1.0 先安装依赖
-    install_dependencies
-    get_public_ip # 获取 IP 准备生成链接
+    install_dependencies "check"
+    get_public_ip
 
-    # 1.1 架构检测
+    # 架构检测
     echo -e "${YELLOW}正在检测系统架构...${PLAIN}"
     ARCH=$(uname -m)
     GOST_ARCH=""
@@ -100,60 +93,116 @@ install_proxy() {
             ;;
     esac
 
-    # 动态构建下载链接
+    # 下载文件
     DOWNLOAD_URL="https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-linux-${GOST_ARCH}-${GOST_VERSION}.gz"
-
-    # 1.2 停止旧服务
-    systemctl stop $SERVICE_NAME >/dev/null 2>&1
-
-    # 1.3 下载并安装二进制文件
-    echo -e "${GREEN}正在下载 GOST 程序文件...${PLAIN}"
-    rm -f "$GOST_PATH" 
     
+    systemctl stop $SERVICE_NAME >/dev/null 2>&1
+    rm -f "$GOST_PATH"
+    
+    echo -e "${GREEN}正在下载 GOST 程序...${PLAIN}"
     wget --no-check-certificate -O gost.gz "$DOWNLOAD_URL"
     
     if [[ $? -ne 0 ]]; then
-        echo -e "${RED}下载失败！请检查服务器网络连接。${PLAIN}"
+        echo -e "${RED}下载失败！请检查网络。${PLAIN}"
         return 1
     fi
 
-    echo -e "${GREEN}正在解压并安装...${PLAIN}"
     gzip -d gost.gz
     mv gost "$GOST_PATH"
     chmod +x "$GOST_PATH"
 
-    # 验证安装
-    if "$GOST_PATH" -V >/dev/null 2>&1; then
-        echo -e "${GREEN}程序安装成功！版本: $("$GOST_PATH" -V 2>&1)${PLAIN}"
-    else
-        echo -e "${RED}程序安装失败 (无法执行)。请联系开发者。${PLAIN}"
+    if ! "$GOST_PATH" -V >/dev/null 2>&1; then
+        echo -e "${RED}程序无法执行，安装失败。${PLAIN}"
         rm -f "$GOST_PATH"
         return 1
     fi
 
-    # 1.4 配置参数 (强制 SOCKS5)
+    # 配置参数
     echo -e ""
     echo -e "${YELLOW}请配置 SOCKS5 代理参数：${PLAIN}"
     read -p "请输入端口 (默认 1080): " PORT
     [[ -z "$PORT" ]] && PORT="1080"
 
-    read -p "请输入用户名 (直接回车表示无密码): " USER
-    read -p "请输入密码 (直接回车表示无密码): " PASS
+    read -p "请输入用户名 (回车无密码): " USER
+    read -p "请输入密码 (回车无密码): " PASS
 
-    # 构建启动命令和 TG 链接
     if [[ -z "$USER" || -z "$PASS" ]]; then
-        # 无密码模式
         EXEC_CMD="$GOST_PATH -L socks5://:$PORT"
-        AUTH_INFO="无认证"
-        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${PORT}"
     else
-        # 有密码模式
         EXEC_CMD="$GOST_PATH -L socks5://${USER}:${PASS}@:$PORT"
-        AUTH_INFO="${USER}:${PASS}"
-        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${PORT}&user=${USER}&pass=${PASS}"
     fi
 
-    # 1.5 创建 Systemd 服务文件
+    # 创建服务
+    write_service_file "$EXEC_CMD"
+    
+    # 启动与防火墙
+    reload_and_restart
+    open_firewall "$PORT"
+
+    # 显示信息
+    echo -e ""
+    echo -e "${GREEN}安装完成！${PLAIN}"
+    view_dashboard "no_wait" # 调用合并后的面板但不暂停
+    wait_and_return
+}
+
+# 2. 修改端口 (新增功能)
+modify_port() {
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "${RED}服务未安装，无法修改。${PLAIN}"
+        wait_and_return
+        return
+    fi
+
+    echo -e "${SKYBLUE}>>> 修改代理端口${PLAIN}"
+    
+    # 读取旧配置以保留账号密码
+    CMD_LINE=$(grep "ExecStart" "$SERVICE_FILE")
+    RAW_CONFIG=$(echo "$CMD_LINE" | sed -n 's/.*socks5:\/\///p')
+    
+    # 解析旧的认证信息
+    if [[ "$RAW_CONFIG" == *"@"* ]]; then
+        USER_PASS=$(echo "$RAW_CONFIG" | cut -d'@' -f1)
+        OLD_USER=$(echo "$USER_PASS" | cut -d':' -f1)
+        OLD_PASS=$(echo "$USER_PASS" | cut -d':' -f2)
+        HAS_AUTH=1
+    else
+        HAS_AUTH=0
+    fi
+
+    # 获取新端口
+    echo -e "当前配置包含账号密码: $(if [[ $HAS_AUTH -eq 1 ]]; then echo "${GREEN}是${PLAIN}"; else echo "${RED}否${PLAIN}"; fi)"
+    read -p "请输入新的端口号: " NEW_PORT
+    
+    if [[ -z "$NEW_PORT" ]]; then
+        echo -e "${RED}端口不能为空！${PLAIN}"
+        wait_and_return
+        return
+    fi
+
+    # 重新构建命令
+    if [[ $HAS_AUTH -eq 1 ]]; then
+        NEW_EXEC_CMD="$GOST_PATH -L socks5://${OLD_USER}:${OLD_PASS}@:$NEW_PORT"
+    else
+        NEW_EXEC_CMD="$GOST_PATH -L socks5://:$NEW_PORT"
+    fi
+
+    # 写入新配置
+    write_service_file "$NEW_EXEC_CMD"
+    
+    # 重启并应用
+    echo -e "${YELLOW}正在应用新端口...${PLAIN}"
+    reload_and_restart
+    open_firewall "$NEW_PORT"
+    
+    echo -e "${GREEN}修改成功！${PLAIN}"
+    view_dashboard "no_wait"
+    wait_and_return
+}
+
+# 通用：写入 Service 文件
+write_service_file() {
+    local CMD=$1
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=GOST SOCKS5 Proxy Service
@@ -161,7 +210,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$EXEC_CMD
+ExecStart=$CMD
 Restart=always
 User=root
 LimitNOFILE=65535
@@ -169,177 +218,111 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    # 1.6 启动服务
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-    systemctl restart "$SERVICE_NAME"
-
-    # 1.7 开放防火墙
-    echo -e "${GREEN}正在配置防火墙...${PLAIN}"
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow "$PORT"/tcp
-        ufw allow "$PORT"/udp
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --add-port="$PORT"/tcp --permanent
-        firewall-cmd --zone=public --add-port="$PORT"/udp --permanent
-        firewall-cmd --reload
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
-        iptables -I INPUT -p udp --dport "$PORT" -j ACCEPT
-    fi
-
-    # 1.8 显示结果
-    echo -e ""
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e "${GREEN}  SOCKS5 代理安装完成并已启动！${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e " 公网 IP  : ${SKYBLUE}${PUBLIC_IP}${PLAIN}"
-    echo -e " 端口     : ${SKYBLUE}${PORT}${PLAIN}"
-    echo -e " 认证信息 : ${SKYBLUE}${AUTH_INFO}${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e "${YELLOW}Telegram 专用一键链接 (点击或复制):${PLAIN}"
-    echo -e "${SKYBLUE}${TG_LINK}${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
-    
-    sleep 1
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        echo -e " 服务状态 : ${GREEN}运行中 (Active)${PLAIN}"
-    else
-        echo -e " 服务状态 : ${RED}启动失败，请检查日志 (选项7)${PLAIN}"
-    fi
-
-    wait_and_return
 }
 
-# 2. 卸载代理
+# 通用：重载并重启
+reload_and_restart() {
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    systemctl restart "$SERVICE_NAME"
+}
+
+# 通用：开放防火墙
+open_firewall() {
+    local PORT=$1
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "$PORT"/tcp >/dev/null 2>&1
+        ufw allow "$PORT"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --zone=public --add-port="$PORT"/tcp --permanent >/dev/null 2>&1
+        firewall-cmd --zone=public --add-port="$PORT"/udp --permanent >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT >/dev/null 2>&1
+        iptables -I INPUT -p udp --dport "$PORT" -j ACCEPT >/dev/null 2>&1
+    fi
+}
+
+# 3. 卸载代理
 uninstall_proxy() {
-    echo -e "${YELLOW}正在停止服务...${PLAIN}"
+    echo -e "${YELLOW}正在停止并卸载...${PLAIN}"
     systemctl stop "$SERVICE_NAME"
     systemctl disable "$SERVICE_NAME"
-    
-    echo -e "${YELLOW}正在清理文件...${PLAIN}"
     rm -f "$SERVICE_FILE"
     rm -f "$GOST_PATH"
     systemctl daemon-reload
-    
     echo -e "${GREEN}卸载完成。${PLAIN}"
     wait_and_return
 }
 
-# 3. 启动服务
-start_proxy() {
-    systemctl start "$SERVICE_NAME"
-    echo -e "${GREEN}服务已启动。${PLAIN}"
-    wait_and_return
-}
+# 4/5/7 服务控制
+start_proxy() { systemctl start "$SERVICE_NAME"; echo -e "${GREEN}已启动${PLAIN}"; wait_and_return; }
+stop_proxy() { systemctl stop "$SERVICE_NAME"; echo -e "${YELLOW}已停止${PLAIN}"; wait_and_return; }
+restart_proxy() { systemctl restart "$SERVICE_NAME"; echo -e "${GREEN}已重启${PLAIN}"; wait_and_return; }
+check_log() { systemctl status "$SERVICE_NAME" --no-pager; wait_and_return; }
 
-# 4. 停止服务
-stop_proxy() {
-    systemctl stop "$SERVICE_NAME"
-    echo -e "${YELLOW}服务已停止。${PLAIN}"
-    wait_and_return
-}
-
-# 5. 重启服务
-restart_proxy() {
-    systemctl restart "$SERVICE_NAME"
-    echo -e "${GREEN}服务已重启。${PLAIN}"
-    wait_and_return
-}
-
-# 6. 查看连接数
-view_connections() {
-    echo -e "${SKYBLUE}>>> 正在检查代理连接监控${PLAIN}"
+# 6. 综合面板 (监控 + 配置 + TG链接)
+view_dashboard() {
+    local MODE=$1 # 传入参数控制是否需要 "按任意键返回"
     
     if [[ ! -f "$SERVICE_FILE" ]]; then
-        echo -e "${RED}服务未安装，无法查看。${PLAIN}"
-        wait_and_return
-        return
-    fi
-    
-    # 提取端口
-    CURRENT_PORT=$(grep "ExecStart" "$SERVICE_FILE" | grep -oE ":[0-9]+" | tail -1 | tr -d ':')
-    
-    if [[ -z "$CURRENT_PORT" ]]; then
-        echo -e "${RED}无法获取端口信息。${PLAIN}"
-    else
-        echo -e "当前监听端口: ${GREEN}${CURRENT_PORT}${PLAIN}"
-        echo -e "---------------------------------"
-        
-        if command -v ss >/dev/null 2>&1; then
-            CONN_COUNT=$(ss -anp | grep ":${CURRENT_PORT} " | grep ESTAB | wc -l)
-        elif command -v netstat >/dev/null 2>&1; then
-            CONN_COUNT=$(netstat -anp | grep ":${CURRENT_PORT} " | grep ESTABLISHED | wc -l)
-        else
-            echo -e "${RED}未找到 ss 或 netstat 命令，请先安装 net-tools。${PLAIN}"
-            wait_and_return
-            return
-        fi
-        
-        echo -e "当前活跃连接数 (ESTABLISHED): ${GREEN}${CONN_COUNT}${PLAIN}"
-    fi
-    
-    wait_and_return
-}
-
-# 7. 查看运行状态
-check_status() {
-    echo -e "${SKYBLUE}>>> Systemd 服务状态日志${PLAIN}"
-    systemctl status "$SERVICE_NAME" --no-pager
-    wait_and_return
-}
-
-# 8. 查看配置信息 & TG链接
-view_config() {
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        echo -e "${RED}服务未安装，无法查看。${PLAIN}"
-        wait_and_return
+        echo -e "${RED}服务未安装。${PLAIN}"
+        if [[ "$MODE" != "no_wait" ]]; then wait_and_return; fi
         return
     fi
 
-    echo -e "${SKYBLUE}>>> 正在读取配置信息...${PLAIN}"
+    # --- 1. 获取配置信息 ---
     get_public_ip
-
-    # 从 Service 文件中解析配置
-    # 格式示例: ExecStart=/usr/bin/gost -L socks5://user:pass@:1080
     CMD_LINE=$(grep "ExecStart" "$SERVICE_FILE")
-    
-    # 提取 socks5:// 后面的部分
     RAW_CONFIG=$(echo "$CMD_LINE" | sed -n 's/.*socks5:\/\///p')
-    
-    # 判断是否包含 @ (是否有密码)
+
     if [[ "$RAW_CONFIG" == *"@"* ]]; then
-        # 有密码: user:pass@:port
         USER_PASS=$(echo "$RAW_CONFIG" | cut -d'@' -f1)
-        PORT_RAW=$(echo "$RAW_CONFIG" | cut -d'@' -f2)
-        
+        CONF_PORT=$(echo "$RAW_CONFIG" | cut -d'@' -f2 | tr -d ':')
         CONF_USER=$(echo "$USER_PASS" | cut -d':' -f1)
         CONF_PASS=$(echo "$USER_PASS" | cut -d':' -f2)
-        CONF_PORT=$(echo "$PORT_RAW" | tr -d ':')
-        
-        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}&user=${CONF_USER}&pass=${CONF_PASS}"
         AUTH_SHOW="${CONF_USER}:${CONF_PASS}"
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}&user=${CONF_USER}&pass=${CONF_PASS}"
     else
-        # 无密码: :port
         CONF_PORT=$(echo "$RAW_CONFIG" | tr -d ':')
-        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}"
         AUTH_SHOW="无认证"
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}"
     fi
 
-    echo -e ""
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e "${GREEN}  SOCKS5 代理配置详情${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e " 服务器 IP : ${SKYBLUE}${PUBLIC_IP}${PLAIN}"
-    echo -e " 端口      : ${SKYBLUE}${CONF_PORT}${PLAIN}"
-    echo -e " 认证信息  : ${SKYBLUE}${AUTH_SHOW}${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
-    echo -e "${YELLOW}Telegram 专用链接:${PLAIN}"
-    echo -e "${SKYBLUE}${TG_LINK}${PLAIN}"
-    echo -e "${GREEN}====================================${PLAIN}"
+    # --- 2. 获取连接数 ---
+    if command -v ss >/dev/null 2>&1; then
+        CONN_COUNT=$(ss -anp | grep ":${CONF_PORT} " | grep ESTAB | wc -l)
+    elif command -v netstat >/dev/null 2>&1; then
+        CONN_COUNT=$(netstat -anp | grep ":${CONF_PORT} " | grep ESTABLISHED | wc -l)
+    else
+        CONN_COUNT="N/A (缺少 net-tools)"
+    fi
 
-    wait_and_return
+    # --- 3. 状态检测 ---
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        STATUS_COLOR="${GREEN}运行中 (Active)${PLAIN}"
+    else
+        STATUS_COLOR="${RED}已停止 (Stopped)${PLAIN}"
+    fi
+
+    # --- 4. 统一显示 ---
+    echo -e ""
+    echo -e "${SKYBLUE}====================================${PLAIN}"
+    echo -e "${SKYBLUE}       GOST SOCKS5 状态面板         ${PLAIN}"
+    echo -e "${SKYBLUE}====================================${PLAIN}"
+    echo -e " 运行状态 : ${STATUS_COLOR}"
+    echo -e " 监听端口 : ${SKYBLUE}${CONF_PORT}${PLAIN}"
+    echo -e " 实时连接 : ${GREEN}${CONN_COUNT}${PLAIN}"
+    echo -e " 公网 IP  : ${SKYBLUE}${PUBLIC_IP}${PLAIN}"
+    echo -e " 认证信息 : ${SKYBLUE}${AUTH_SHOW}${PLAIN}"
+    echo -e "------------------------------------"
+    echo -e "${YELLOW}Telegram 一键连接:${PLAIN}"
+    echo -e "${SKYBLUE}${TG_LINK}${PLAIN}"
+    echo -e "${SKYBLUE}====================================${PLAIN}"
+
+    if [[ "$MODE" != "no_wait" ]]; then
+        wait_and_return
+    fi
 }
 
 # --- 菜单界面 ---
@@ -349,18 +332,17 @@ show_menu() {
     clear
     echo -e "${SKYBLUE}====================================${PLAIN}"
     echo -e "${SKYBLUE}   VPS SOCKS5 代理管理脚本 (GOST)   ${PLAIN}"
-    echo -e "${SKYBLUE}   功能: 自动依赖 | TG直连生成      ${PLAIN}"
+    echo -e "${SKYBLUE}   架构: 自适应 | 模式: SOCKS5 Only ${PLAIN}"
     echo -e "${SKYBLUE}====================================${PLAIN}"
-    echo -e "${GREEN}1.${PLAIN} 安装/重装代理 (SOCKS5 专用)"
-    echo -e "${GREEN}2.${PLAIN} 卸载代理"
+    echo -e "${GREEN}1.${PLAIN} 安装/重装代理"
+    echo -e "${GREEN}2.${PLAIN} 修改代理端口 ${YELLOW}(NEW)${PLAIN}"
+    echo -e "${GREEN}3.${PLAIN} 卸载代理"
     echo -e "------------------------------------"
-    echo -e "${GREEN}3.${PLAIN} 启动服务"
-    echo -e "${GREEN}4.${PLAIN} 停止服务"
-    echo -e "${GREEN}5.${PLAIN} 重启服务"
-    echo -e "------------------------------------"
-    echo -e "${GREEN}6.${PLAIN} 查看连接数 (监控)"
-    echo -e "${GREEN}7.${PLAIN} 查看运行状态 (Systemd)"
-    echo -e "${GREEN}8.${PLAIN} 查看配置信息 & TG链接"
+    echo -e "${GREEN}4.${PLAIN} 启动服务"
+    echo -e "${GREEN}5.${PLAIN} 停止服务"
+    echo -e "${GREEN}6.${PLAIN} 面板: 状态 / 配置 / TG链接"
+    echo -e "${GREEN}7.${PLAIN} 重启服务"
+    echo -e "${GREEN}8.${PLAIN} 查看系统日志 (Debug)"
     echo -e "------------------------------------"
     echo -e "${GREEN}0.${PLAIN} 退出脚本"
     echo -e ""
@@ -368,15 +350,15 @@ show_menu() {
     read -p "请输入数字 [0-8]: " choice
     case $choice in
         1) install_proxy ;;
-        2) uninstall_proxy ;;
-        3) start_proxy ;;
-        4) stop_proxy ;;
-        5) restart_proxy ;;
-        6) view_connections ;;
-        7) check_status ;;
-        8) view_config ;;
+        2) modify_port ;;
+        3) uninstall_proxy ;;
+        4) start_proxy ;;
+        5) stop_proxy ;;
+        6) view_dashboard ;;
+        7) restart_proxy ;;
+        8) check_log ;;
         0) exit 0 ;;
-        *) echo -e "${RED}输入无效，请重新输入！${PLAIN}"; sleep 1; show_menu ;;
+        *) echo -e "${RED}输入无效！${PLAIN}"; sleep 1; show_menu ;;
     esac
 }
 
