@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =========================================================
-#   VPS SOCKS5 代理一键管理脚本 (GOST v2) - 纯净版
+#   VPS SOCKS5 代理一键管理脚本 (GOST v2) - TG 链接增强版
 #   架构: 全架构自适应 (x86_64 / ARM64)
-#   功能: 仅 SOCKS5 协议 | 自动安装依赖 | 系统服务管理
+#   功能: SOCKS5 协议 | 自动安装依赖 | 生成 Telegram 链接
 # =========================================================
 
 # --- 基础配置 ---
@@ -27,6 +27,15 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}错误：请使用 root 用户运行此脚本！${PLAIN}"
         exit 1
+    fi
+}
+
+# 获取公网 IP
+get_public_ip() {
+    # 尝试多个接口以确保获取成功
+    PUBLIC_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || curl -s https://icanhazip.com)
+    if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP="127.0.0.1" # 获取失败时的兜底
     fi
 }
 
@@ -69,6 +78,7 @@ install_proxy() {
 
     # 1.0 先安装依赖
     install_dependencies
+    get_public_ip # 获取 IP 准备生成链接
 
     # 1.1 架构检测
     echo -e "${YELLOW}正在检测系统架构...${PLAIN}"
@@ -130,15 +140,17 @@ install_proxy() {
     read -p "请输入用户名 (直接回车表示无密码): " USER
     read -p "请输入密码 (直接回车表示无密码): " PASS
 
-    # 构建启动命令 (关键修改：增加 socks5:// 前缀)
+    # 构建启动命令和 TG 链接
     if [[ -z "$USER" || -z "$PASS" ]]; then
         # 无密码模式
         EXEC_CMD="$GOST_PATH -L socks5://:$PORT"
         AUTH_INFO="无认证"
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${PORT}"
     else
         # 有密码模式
         EXEC_CMD="$GOST_PATH -L socks5://${USER}:${PASS}@:$PORT"
         AUTH_INFO="${USER}:${PASS}"
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${PORT}&user=${USER}&pass=${PASS}"
     fi
 
     # 1.5 创建 Systemd 服务文件
@@ -182,10 +194,12 @@ EOF
     echo -e "${GREEN}====================================${PLAIN}"
     echo -e "${GREEN}  SOCKS5 代理安装完成并已启动！${PLAIN}"
     echo -e "${GREEN}====================================${PLAIN}"
-    echo -e " 架构检测 : ${SKYBLUE}${ARCH} -> ${GOST_ARCH}${PLAIN}"
-    echo -e " 协议类型 : ${SKYBLUE}SOCKS5 纯净模式${PLAIN}"
+    echo -e " 公网 IP  : ${SKYBLUE}${PUBLIC_IP}${PLAIN}"
     echo -e " 端口     : ${SKYBLUE}${PORT}${PLAIN}"
     echo -e " 认证信息 : ${SKYBLUE}${AUTH_INFO}${PLAIN}"
+    echo -e "${GREEN}====================================${PLAIN}"
+    echo -e "${YELLOW}Telegram 专用一键链接 (点击或复制):${PLAIN}"
+    echo -e "${SKYBLUE}${TG_LINK}${PLAIN}"
     echo -e "${GREEN}====================================${PLAIN}"
     
     sleep 1
@@ -276,6 +290,58 @@ check_status() {
     wait_and_return
 }
 
+# 8. 查看配置信息 & TG链接
+view_config() {
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "${RED}服务未安装，无法查看。${PLAIN}"
+        wait_and_return
+        return
+    fi
+
+    echo -e "${SKYBLUE}>>> 正在读取配置信息...${PLAIN}"
+    get_public_ip
+
+    # 从 Service 文件中解析配置
+    # 格式示例: ExecStart=/usr/bin/gost -L socks5://user:pass@:1080
+    CMD_LINE=$(grep "ExecStart" "$SERVICE_FILE")
+    
+    # 提取 socks5:// 后面的部分
+    RAW_CONFIG=$(echo "$CMD_LINE" | sed -n 's/.*socks5:\/\///p')
+    
+    # 判断是否包含 @ (是否有密码)
+    if [[ "$RAW_CONFIG" == *"@"* ]]; then
+        # 有密码: user:pass@:port
+        USER_PASS=$(echo "$RAW_CONFIG" | cut -d'@' -f1)
+        PORT_RAW=$(echo "$RAW_CONFIG" | cut -d'@' -f2)
+        
+        CONF_USER=$(echo "$USER_PASS" | cut -d':' -f1)
+        CONF_PASS=$(echo "$USER_PASS" | cut -d':' -f2)
+        CONF_PORT=$(echo "$PORT_RAW" | tr -d ':')
+        
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}&user=${CONF_USER}&pass=${CONF_PASS}"
+        AUTH_SHOW="${CONF_USER}:${CONF_PASS}"
+    else
+        # 无密码: :port
+        CONF_PORT=$(echo "$RAW_CONFIG" | tr -d ':')
+        TG_LINK="https://t.me/socks?server=${PUBLIC_IP}&port=${CONF_PORT}"
+        AUTH_SHOW="无认证"
+    fi
+
+    echo -e ""
+    echo -e "${GREEN}====================================${PLAIN}"
+    echo -e "${GREEN}  SOCKS5 代理配置详情${PLAIN}"
+    echo -e "${GREEN}====================================${PLAIN}"
+    echo -e " 服务器 IP : ${SKYBLUE}${PUBLIC_IP}${PLAIN}"
+    echo -e " 端口      : ${SKYBLUE}${CONF_PORT}${PLAIN}"
+    echo -e " 认证信息  : ${SKYBLUE}${AUTH_SHOW}${PLAIN}"
+    echo -e "${GREEN}====================================${PLAIN}"
+    echo -e "${YELLOW}Telegram 专用链接:${PLAIN}"
+    echo -e "${SKYBLUE}${TG_LINK}${PLAIN}"
+    echo -e "${GREEN}====================================${PLAIN}"
+
+    wait_and_return
+}
+
 # --- 菜单界面 ---
 
 show_menu() {
@@ -283,7 +349,7 @@ show_menu() {
     clear
     echo -e "${SKYBLUE}====================================${PLAIN}"
     echo -e "${SKYBLUE}   VPS SOCKS5 代理管理脚本 (GOST)   ${PLAIN}"
-    echo -e "${SKYBLUE}   架构: 自适应 (含依赖自动更新)    ${PLAIN}"
+    echo -e "${SKYBLUE}   功能: 自动依赖 | TG直连生成      ${PLAIN}"
     echo -e "${SKYBLUE}====================================${PLAIN}"
     echo -e "${GREEN}1.${PLAIN} 安装/重装代理 (SOCKS5 专用)"
     echo -e "${GREEN}2.${PLAIN} 卸载代理"
@@ -294,11 +360,12 @@ show_menu() {
     echo -e "------------------------------------"
     echo -e "${GREEN}6.${PLAIN} 查看连接数 (监控)"
     echo -e "${GREEN}7.${PLAIN} 查看运行状态 (Systemd)"
+    echo -e "${GREEN}8.${PLAIN} 查看配置信息 & TG链接"
     echo -e "------------------------------------"
     echo -e "${GREEN}0.${PLAIN} 退出脚本"
     echo -e ""
     
-    read -p "请输入数字 [0-7]: " choice
+    read -p "请输入数字 [0-8]: " choice
     case $choice in
         1) install_proxy ;;
         2) uninstall_proxy ;;
@@ -307,6 +374,7 @@ show_menu() {
         5) restart_proxy ;;
         6) view_connections ;;
         7) check_status ;;
+        8) view_config ;;
         0) exit 0 ;;
         *) echo -e "${RED}输入无效，请重新输入！${PLAIN}"; sleep 1; show_menu ;;
     esac
