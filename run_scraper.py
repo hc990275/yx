@@ -4,80 +4,52 @@ import requests
 from bs4 import BeautifulSoup
 import datetime
 
-# 如果环境变量不存在，使用默认 URL (方便测试)
+# 默认配置
 URL = os.environ.get("VPN_SOURCE_URL", "https://ipspeed.info/free-l2tpipsec.php")
 FILE_NAME = "家宽/非219IP.md"
 
 def get_new_data():
-    """
-    基于 HTML 表格结构的精准抓取
-    结构: <tr> <th>序号</th> <td>地区</td> <td>IP</td> ... </tr>
-    """
+    """抓取新数据"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     valid_lines = []
-    
     try:
         print(f"正在抓取: {URL}")
         resp = requests.get(URL, headers=headers, timeout=30)
         resp.encoding = 'utf-8'
-        
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # 1. 找到页面中的表格
-        # table-success table-striped 是该网站特有的类名，或者直接找第一个 table
         table = soup.find('table')
-        if not table:
-            print("错误: 未找到表格结构")
-            return []
+        if not table: return []
 
-        # 2. 遍历所有表格行
-        # tbody 下的 tr
         rows = table.find_all('tr')
-        
         for row in rows:
             cols = row.find_all('td')
-            # 根据源码:
-            # <th>1</th> (序号, 可能在 th 里)
-            # <td>Japan</td> (索引 0)
-            # <td>219.100.37.176</td> (索引 1)
-            
             if len(cols) >= 2:
                 location = cols[0].get_text(strip=True)
                 ip = cols[1].get_text(strip=True)
                 
-                # 简单的 IP 校验
-                if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
-                    
-                    # --- 核心过滤: 排除 219 开头 ---
-                    if not ip.startswith("219."):
-                        # 格式化为: | IP | 地区 |
-                        line_str = f"| {ip} | {location} |"
-                        valid_lines.append(line_str)
-                        print(f"提取成功: {ip} ({location})")
-                    else:
-                        # print(f"跳过 219 IP: {ip}")
-                        pass
-                
+                # 核心过滤: 必须是IP格式 且 不以219开头
+                if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip) and not ip.startswith("219."):
+                    # 统一格式化
+                    valid_lines.append(f"| {ip} | {location} |")
         return valid_lines
-
     except Exception as e:
         print(f"抓取异常: {e}")
         return []
 
 def load_old_data():
-    """读取历史数据，用于持久化"""
+    """读取旧文件所有内容"""
     if not os.path.exists(FILE_NAME):
         return []
     
     old_lines = []
-    # 读取文件，排除表头
     with open(FILE_NAME, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            # 只要是以 "| 数字" 开头的行，我们认为是数据行
-            if line.startswith("|") and re.search(r'\|\s*\d', line):
+            # 只要包含 IP 的表格行都读进来
+            if line.startswith("|") and re.search(r'\d+\.\d+\.\d+\.\d+', line):
                 old_lines.append(line)
     return old_lines
 
@@ -90,36 +62,45 @@ def main():
     print(f"新抓取: {len(new_data)} 条")
     print(f"历史库: {len(old_data)} 条")
 
-    if not new_data and not old_data:
-        print("无任何数据，退出")
-        return
+    # ==========================================
+    # 核心修改：基于 IP 的智能去重
+    # ==========================================
+    
+    # 1. 把新旧数据拼起来，新数据在前（优先级高）
+    all_candidates = new_data + old_data
+    
+    unique_lines = []
+    seen_ips = set()
+    
+    # 正则表达式：专门用来从表格行里提取 IP
+    # 匹配 | 1.2.3.4 | 这种格式中间的 IP
+    ip_extract_pattern = re.compile(r'\|\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*\|')
 
-    # --- 合并策略: 新数据在前 (倒序) ---
-    combined = new_data + old_data
+    for line in all_candidates:
+        match = ip_extract_pattern.search(line)
+        if match:
+            ip = match.group(1)
+            
+            # 只有当这个 IP 第一次出现时，才保留这一行
+            # 因为我们把 new_data 放在最前面，所以保留的一定是最新的那条（带地区的）
+            # 旧文件里重复的 IP（无论带不带地区）都会因为 if ip in seen_ips 而被跳过
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_lines.append(line)
     
-    # --- 去重策略: 保留第一次出现的 (即保留最新的) ---
-    seen = set()
-    unique_data = []
-    for item in combined:
-        # 以 "IP" 为去重键，防止地区名变化导致重复 (可选)
-        # 这里简单起见，如果整行内容一样就去重
-        if item not in seen:
-            seen.add(item)
-            unique_data.append(item)
-    
-    print(f"去重后总数: {len(unique_data)} 条")
+    print(f"智能去重后: {len(unique_lines)} 条")
 
     # 写入文件
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(FILE_NAME, "w", encoding="utf-8") as f:
         f.write(f"# 非 219 IP 永久记录库\n\n")
-        f.write(f"> 更新时间: {timestamp} (UTC) | 有效数据: {len(unique_data)}\n\n")
+        f.write(f"> 更新时间: {timestamp} (UTC) | 有效数据: {len(unique_lines)}\n\n")
         f.write(f"| IP 地址 | 地区信息 |\n")
         f.write(f"| :--- | :--- |\n")
-        for line in unique_data:
+        for line in unique_lines:
             f.write(f"{line}\n")
     
-    print("文件写入完成")
+    print("文件清理并保存完成")
 
 if __name__ == "__main__":
     main()
