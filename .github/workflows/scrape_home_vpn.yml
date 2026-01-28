@@ -1,4 +1,4 @@
-name: 抓取家宽 VPN (智能去重版)
+name: 抓取家宽 VPN (双列表更新版)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: '*/5 * * * *'  # 每5分钟运行一次
 
 jobs:
-  scrape-deduplicate-smart:
+  scrape-dual-update:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,7 +23,7 @@ jobs:
       - name: 安装依赖
         run: pip install requests beautifulsoup4
 
-      - name: 生成并运行抓取脚本
+      - name: 生成并运行双轨抓取脚本
         env:
           VPN_SOURCE_URL: ${{ secrets.VPN_SOURCE_URL }}
         run: |
@@ -36,14 +36,21 @@ jobs:
 
           # 默认配置
           URL = os.environ.get("VPN_SOURCE_URL", "https://ipspeed.info/free-l2tpipsec.php")
-          FILE_NAME = "家宽/非219IP.md"
+          FILE_NON_219 = "家宽/非219IP.md"
+          FILE_README = "家宽/README.md"
 
-          def get_new_data():
-              """抓取新数据"""
+          def get_data_from_web():
+              """
+              从网页抓取所有有效数据，返回两个列表：
+              1. all_lines: 包含所有抓取到的数据（用于 README）
+              2. new_non_219_lines: 仅包含非 219 的新数据（用于持久化）
+              """
               headers = {
                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
               }
-              valid_lines = []
+              all_lines = []
+              new_non_219_lines = []
+              
               try:
                   print(f"正在抓取: {URL}")
                   resp = requests.get(URL, headers=headers, timeout=30)
@@ -51,7 +58,7 @@ jobs:
                   soup = BeautifulSoup(resp.text, 'html.parser')
                   
                   table = soup.find('table')
-                  if not table: return []
+                  if not table: return [], []
 
                   rows = table.find_all('tr')
                   for row in rows:
@@ -60,77 +67,88 @@ jobs:
                           location = cols[0].get_text(strip=True)
                           ip = cols[1].get_text(strip=True)
                           
-                          # 核心过滤: 必须是IP格式 且 不以219开头
-                          if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip) and not ip.startswith("219."):
-                              # 统一格式化
-                              valid_lines.append(f"| {ip} | {location} |")
-                  return valid_lines
+                          # 基础 IP 校验
+                          if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
+                              line_str = f"| {ip} | {location} |"
+                              
+                              # 1. 存入全量列表
+                              all_lines.append(line_str)
+                              
+                              # 2. 筛选非 219 存入精选列表
+                              if not ip.startswith("219."):
+                                  new_non_219_lines.append(line_str)
+                                  
+                  return all_lines, new_non_219_lines
               except Exception as e:
                   print(f"抓取异常: {e}")
-                  return []
+                  return [], []
 
-          def load_old_data():
-              """读取旧文件所有内容"""
-              if not os.path.exists(FILE_NAME):
-                  return []
+          def update_readme(all_data):
+              """更新 README.md (覆盖更新，显示最新抓取结果)"""
+              if not all_data: return
               
+              timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+              with open(FILE_README, "w", encoding="utf-8") as f:
+                  f.write(f"# 家宽 VPN 完整列表 (最新快照)\n\n")
+                  f.write(f"> 更新时间: {timestamp} (UTC) | 当前在线: {len(all_data)}\n\n")
+                  f.write(f"| IP 地址 | 地区信息 |\n")
+                  f.write(f"| :--- | :--- |\n")
+                  for line in all_data:
+                      f.write(f"{line}\n")
+              print(f"✅ README.md 已更新 (包含 {len(all_data)} 条数据)")
+
+          def update_non_219(new_data):
+              """更新 非219IP.md (持久化 + 智能去重)"""
+              # 读取旧数据
               old_lines = []
-              with open(FILE_NAME, "r", encoding="utf-8") as f:
-                  for line in f:
-                      line = line.strip()
-                      # 只要包含 IP 的表格行都读进来
-                      if line.startswith("|") and re.search(r'\d+\.\d+\.\d+\.\d+', line):
-                          old_lines.append(line)
-              return old_lines
+              if os.path.exists(FILE_NON_219):
+                  with open(FILE_NON_219, "r", encoding="utf-8") as f:
+                      for line in f:
+                          line = line.strip()
+                          # 只要包含 IP 的表格行都读进来
+                          if line.startswith("|") and re.search(r'\d+\.\d+\.\d+\.\d+', line):
+                              old_lines.append(line)
 
-          def main():
-              os.makedirs("家宽", exist_ok=True)
-
-              new_data = get_new_data()
-              old_data = load_old_data()
-              
-              print(f"新抓取: {len(new_data)} 条")
-              print(f"历史库: {len(old_data)} 条")
-
-              # ==========================================
-              # 核心修改：基于 IP 的智能去重
-              # ==========================================
-              
-              # 1. 把新旧数据拼起来，新数据在前（优先级高）
-              all_candidates = new_data + old_data
+              # 合并：新数据在前
+              candidates = new_data + old_lines
               
               unique_lines = []
               seen_ips = set()
-              
-              # 正则表达式：专门用来从表格行里提取 IP
-              # 匹配 | 1.2.3.4 | 这种格式中间的 IP
               ip_extract_pattern = re.compile(r'\|\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*\|')
 
-              for line in all_candidates:
+              for line in candidates:
                   match = ip_extract_pattern.search(line)
                   if match:
                       ip = match.group(1)
-                      
-                      # 只有当这个 IP 第一次出现时，才保留这一行
-                      # 因为我们把 new_data 放在最前面，所以保留的一定是最新的那条（带地区的）
-                      # 旧文件里重复的 IP（无论带不带地区）都会因为 if ip in seen_ips 而被跳过
                       if ip not in seen_ips:
                           seen_ips.add(ip)
                           unique_lines.append(line)
               
-              print(f"智能去重后: {len(unique_lines)} 条")
-
-              # 写入文件
               timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-              with open(FILE_NAME, "w", encoding="utf-8") as f:
+              with open(FILE_NON_219, "w", encoding="utf-8") as f:
                   f.write(f"# 非 219 IP 永久记录库\n\n")
-                  f.write(f"> 更新时间: {timestamp} (UTC) | 有效数据: {len(unique_lines)}\n\n")
+                  f.write(f"> 更新时间: {timestamp} (UTC) | 有效记录: {len(unique_lines)}\n\n")
                   f.write(f"| IP 地址 | 地区信息 |\n")
                   f.write(f"| :--- | :--- |\n")
                   for line in unique_lines:
                       f.write(f"{line}\n")
+              print(f"✅ 非219IP.md 已更新 (总记录 {len(unique_lines)} 条)")
+
+          def main():
+              os.makedirs("家宽", exist_ok=True)
+
+              # 1. 抓取
+              all_lines, new_non_219_lines = get_data_from_web()
               
-              print("文件清理并保存完成")
+              if not all_lines:
+                  print("⚠️ 本次未抓取到任何数据")
+                  return
+
+              # 2. 更新 完整列表 (README.md)
+              update_readme(all_lines)
+
+              # 3. 更新 精选列表 (非219IP.md)
+              update_non_219(new_non_219_lines)
 
           if __name__ == "__main__":
               main()
@@ -143,9 +161,10 @@ jobs:
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "action@github.com"
           
+          # 检查是否有任何文件变动
           if [[ -n $(git status -s) ]]; then
             git add .
-            git commit -m "自动更新: 修复重复数据 (IP级去重) [$(date '+%H:%M')]"
+            git commit -m "自动更新: 双列表同步 (完整列表+非219库) [$(date '+%H:%M')]"
             git push
           else
             echo "无变动"
