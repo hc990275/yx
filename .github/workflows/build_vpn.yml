@@ -1,0 +1,175 @@
+name: Build VPN Client
+
+on:
+  workflow_dispatch: # 允许手动点击按钮运行
+
+jobs:
+  build:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Setup Go Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      # 1. 自动下载并转换图标 (WebP -> ICO)
+      - name: Download and Convert Icon
+        run: |
+          # 下载 WebP 图片 (使用 Raw URL)
+          $iconUrl = "https://raw.githubusercontent.com/hc990275/yx/main/%E5%AE%B6%E5%AE%BD/home_icon-icons.com_73532.webp"
+          Invoke-WebRequest -Uri $iconUrl -OutFile "icon.webp"
+          
+          # 使用 ImageMagick 将 WebP 转换为标准的 Windows ICO 文件
+          # auto-resize 会自动生成不同尺寸的图标以适配 Windows 显示
+          magick icon.webp -define icon:auto-resize=256,128,64,48,32,16 icon.ico
+          
+          Write-Host "图标已转换完成"
+        shell: pwsh
+
+      # 2. 自动生成 Go 源代码 (写入 main.go)
+      - name: Generate Go Code
+        run: |
+          $code = @"
+          package main
+
+          import (
+            "fmt"
+            "io"
+            "net/http"
+            "os"
+            "os/exec"
+            "strings"
+            "syscall"
+            "time"
+            "unsafe"
+          )
+
+          var (
+            user32          = syscall.NewLazyDLL("user32.dll")
+            shell32         = syscall.NewLazyDLL("shell32.dll")
+            procMessageBoxW = user32.NewProc("MessageBoxW")
+            procShellExec   = shell32.NewProc("ShellExecuteW")
+          )
+
+          func main() {
+            if !isAdmin() {
+              runMeElevated()
+              return
+            }
+
+            vpnName := "家宽"
+            vpnUser := "vpn"
+            vpnPass := "vpn"
+            vpnPsk := "vpn"
+            url := "https://raw.abcai.online/s/03774ec5"
+
+            ip := getIP(url)
+            if ip == "" {
+              msgBox("错误", "无法获取 IP，请检查网络。", 0x10)
+              return
+            }
+
+            // 静默执行 VPN 操作
+            runCommand(fmt.Sprintf("rasdial \"%s\" /disconnect", vpnName))
+            
+            // 删除旧配置
+            psRemove := fmt.Sprintf("Remove-VpnConnection -Name '%s' -Force -ErrorAction SilentlyContinue", vpnName)
+            runPowerShell(psRemove)
+
+            // 添加新配置
+            psAdd := fmt.Sprintf("Add-VpnConnection -Name '%s' -ServerAddress '%s' -TunnelType L2tp -L2tpPsk '%s' -AuthenticationMethod MSChapv2 -Force", vpnName, ip, vpnPsk)
+            runPowerShell(psAdd)
+
+            // 连接
+            cmdConnect := fmt.Sprintf("rasdial \"%s\" \"%s\" \"%s\"", vpnName, vpnUser, vpnPass)
+            err := runCommand(cmdConnect)
+
+            if err == nil {
+              openURL("https://github.com/hc990275")
+              openURL("https://ping0.cc/")
+              openURL("https://ping0.cc/")
+              openURL("https://www.youtube.com/watch?v=5USuekk16e0")
+              msgBox("成功", "VPN 已连接", 0x40)
+            } else {
+              msgBox("失败", "连接失败，请重试。", 0x10)
+            }
+          }
+
+          func getIP(url string) string {
+            client := http.Client{Timeout: 10 * time.Second}
+            resp, err := client.Get(url)
+            if err != nil { return "" }
+            defer resp.Body.Close()
+            body, _ := io.ReadAll(resp.Body)
+            return strings.TrimSpace(string(body))
+          }
+
+          func runCommand(cmdStr string) error {
+            cmd := exec.Command("cmd", "/C", cmdStr)
+            cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+            return cmd.Run()
+          }
+
+          func runPowerShell(psCmd string) {
+            cmd := exec.Command("powershell", "-WindowStyle", "Hidden", "-Command", psCmd)
+            cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+            cmd.Run()
+          }
+
+          func openURL(url string) {
+            exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+          }
+
+          func msgBox(title, content string, style uintptr) {
+            titlePtr, _ := syscall.UTF16PtrFromString(title)
+            contentPtr, _ := syscall.UTF16PtrFromString(content)
+            procMessageBoxW.Call(0, uintptr(unsafe.Pointer(contentPtr)), uintptr(unsafe.Pointer(titlePtr)), style)
+          }
+
+          func isAdmin() bool {
+            _, err := os.Open("\\\\.\\PHYSICALDRIVE0")
+            return err == nil
+          }
+
+          func runMeElevated() {
+            exe, _ := os.Executable()
+            cwd, _ := os.Getwd()
+            ptrExe, _ := syscall.UTF16PtrFromString(exe)
+            ptrDir, _ := syscall.UTF16PtrFromString(cwd)
+            ptrVerb, _ := syscall.UTF16PtrFromString("runas")
+            procShellExec.Call(0, uintptr(unsafe.Pointer(ptrVerb)), uintptr(unsafe.Pointer(ptrExe)), 0, uintptr(unsafe.Pointer(ptrDir)), 1)
+          }
+          "@
+
+          # 将 Go 代码写入文件
+          Set-Content -Path "main.go" -Value $code -Encoding UTF8
+          
+          # 初始化 Go 模块
+          go mod init vpn-client
+          go mod tidy
+        shell: pwsh
+
+      # 3. 安装打包工具 (rsrc 和 garble)
+      - name: Install Build Tools
+        run: |
+          go install github.com/akavel/rsrc@latest
+          go install mvdan.cc/garble@latest
+
+      # 4. 生成资源文件并混淆编译
+      - name: Build EXE
+        run: |
+          # 将转换好的 icon.ico 打包进资源文件
+          rsrc -ico icon.ico -o rsrc.syso
+          
+          # 使用 garble 进行混淆编译，去除黑框 (-H windowsgui)
+          garble -tiny -literals -seed=random build -ldflags="-w -s -H windowsgui" -o VPN_Connect.exe main.go
+
+      # 5. 上传结果供下载
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VPN_Client_EXE
+          path: VPN_Connect.exe
+          retention-days: 5
