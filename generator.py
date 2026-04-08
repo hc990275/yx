@@ -25,11 +25,12 @@ def main():
     ip_list_url = "https://raw.githubusercontent.com/hc990275/yx/main/cfyxip.txt"
     output_file = "deip.txt"
 
-    # 1. 检查今日是否已运行
-    if os.path.exists(output_file):
+    # 1. 检查今日是否已运行 (如果是手动触发或设置了强制更新，则跳过此检查)
+    force_update = os.environ.get("FORCE_UPDATE", "false").lower() == "true"
+    if not force_update and os.path.exists(output_file):
         mtime = os.path.getmtime(output_file)
         if datetime.fromtimestamp(mtime).date() == datetime.now().date():
-            print(f"今日已更新，跳过执行。")
+            print(f"今日已更新，且非强制更新模式，跳过执行。")
             return
 
     # 2. 从变量读取模板
