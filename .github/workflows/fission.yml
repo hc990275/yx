@@ -39,6 +39,7 @@ jobs:
           TARGET_REGIONS: ${{ env.TARGET_REGIONS }}
           PER_REGION_COUNT: ${{ env.PER_REGION_COUNT }}
           VMESS_TEMPLATE: ${{ secrets.VMESS_TEMPLATE }}
+          FORCE_UPDATE: ${{ github.event_name != 'schedule' }}
 
       - name: Commit and Push Changes
         run: |
