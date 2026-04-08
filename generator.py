@@ -25,13 +25,24 @@ def main():
     ip_list_url = "https://raw.githubusercontent.com/hc990275/yx/main/cfyxip.txt"
     output_file = "deip.txt"
 
-    # 1. 检查今日是否已运行 (如果是手动触发或设置了强制更新，则跳过此检查)
+    # 1. 检查今日是否已运行 (通过 Git 记录判断仓库文件是否今天更新过)
     force_update = os.environ.get("FORCE_UPDATE", "false").lower() == "true"
     if not force_update and os.path.exists(output_file):
-        mtime = os.path.getmtime(output_file)
-        if datetime.fromtimestamp(mtime).date() == datetime.now().date():
-            print(f"今日已更新，且非强制更新模式，跳过执行。")
-            return
+        try:
+            import subprocess
+            # 获取 deip.txt 最后一次提交的短日期 (YYYY-MM-DD)
+            last_commit_date = subprocess.check_output(
+                ['git', 'log', '-1', '--format=%ad', '--date=short', output_file],
+                stderr=subprocess.DEVNULL
+            ).decode('utf-8').strip()
+            
+            today_date = datetime.now().strftime("%Y-%m-%d")
+            if last_commit_date == today_date:
+                print(f"检测到仓库中 {output_file} 今日已更新 ({last_commit_date})，跳过执行。")
+                return
+        except Exception as e:
+            # 如果没有 git 环境或获取失败，则保底不跳过
+            print(f"无法获取 Git 记录，将继续执行：{e}")
 
     # 2. 从变量读取模板
     template_raw = os.environ.get("VMESS_TEMPLATE")
