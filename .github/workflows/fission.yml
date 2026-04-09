@@ -1,24 +1,20 @@
 name: CF Node Fission
-
 on:
   schedule:
-    # 每天北京时间 12:00 (UTC 4:00) 运行一次
+    # 每天北京时间 12:00 (UTC 4:00) 运行
     - cron: "0 4 * * *"
   workflow_dispatch:
 
 env:
   # === 用户自定义配置区 ===
-  TARGET_REGIONS: "SG,HK,US,JP,TW"   # 目标地区，新增了 TW
-  PER_REGION_COUNT: "30"             # 每个地区选取的节点数量改为 30
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  
-  # ======================
+  TARGET_REGIONS: "SG,HK,US,JP,TW"   # 目标地区
+  PER_REGION_COUNT: "30"             # 每个地区选取的节点数量
 
 jobs:
   fission:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -52,10 +48,9 @@ jobs:
           
           git add deip.txt
           
-          # 检查是否有变更，即使只有一行注释也会检测到
           if git diff --staged --quiet; then
             echo "No changes in deip.txt, nothing to commit."
           else
             git commit -m "feat: auto fission nodes for regions ${{ env.TARGET_REGIONS }} [$(date +'%Y-%m-%d %H:%M')]"
-            git push origin HEAD
+            git push origin ${{ github.ref_name }}
           fi
