@@ -56,7 +56,12 @@ export default {
       }
 
       // 新增：退出登录后端处理
-      if (_authUrl.pathname === '/auth-logout') {
+      if (_authUrl.pathname === '/auth-logout' && request.method === 'POST') {
+        const _logoutCookie = request.headers.get('Cookie') || '';
+        const _isLogoutAuth = await verifyAuthCookie(_logoutCookie, env.password);
+        if (!_isLogoutAuth) {
+          return new Response(JSON.stringify({ success: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
         return new Response(JSON.stringify({ success: true }), {
           headers: { 
             'Content-Type': 'application/json',
